@@ -1,0 +1,108 @@
+service: store-ai-bot
+
+frameworkVersion: '3'
+
+plugins:
+  - serverless-esbuild
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  stage: dev
+  region: ap-southeast-1
+  environment:
+    WHATSAPP_API_VERSION: v19.0
+    POS_FASTAPI_BASE_URL: 'https://i5vux53zk8.execute-api.ap-southeast-1.amazonaws.com/dev'
+    SESSION_TABLE_NAME: ${self:service}-${sls:stage}-sessions
+    DEALS_TABLE_NAME: ${self:service}-${sls:stage}-deals
+    WEBHOOK_VERIFY_TOKEN: 'pasarnext'
+    REPLICATE_API_TOKEN: 'r8_BYNZbnbXneg5HJUQWqSr4AyoFi10C0D4KuaiC'
+    # Note: Sensitive tokens are fetched from DynamoDB at runtime
+
+  iam:
+    role:
+      statements:
+        - Effect: "Allow"
+          Action:
+            - "dynamodb:GetItem"
+            - "dynamodb:PutItem"
+            - "dynamodb:UpdateItem"
+            - "dynamodb:Query"
+            - "dynamodb:Scan"
+          Resource:
+            - "arn:aws:dynamodb:us-east-1:${aws:accountId}:table/WhatsappStoreTokens"
+            - "arn:aws:dynamodb:us-east-1:${aws:accountId}:table/StoreProductsTable"
+            - "arn:aws:dynamodb:us-east-1:${aws:accountId}:table/StorePosOrdersTable"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:service}-${sls:stage}-sessions"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:service}-${sls:stage}-deals"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:service}-${sls:stage}-deals/index/*"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/LobangLahUsers"
+        - Effect: "Allow"
+          Action:
+            - "s3:GetObject"
+          Resource: "arn:aws:s3:::*/*" # Adjust if a more specific bucket is needed
+
+
+functions:
+  webhook:
+    handler: src/handlers/webhook.handler
+    description: "Handles incoming WhatsApp messages and API calls. Multi-store support with dynamic store detection."
+    timeout: 300  # 5 minutes
+    events:
+      - httpApi:
+          method: ANY
+          path: /webhook
+
+resources:
+  Resources:
+    SessionsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${sls:stage}-sessions
+        AttributeDefinitions:
+          - AttributeName: sessionId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: sessionId
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+    
+    DealsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${sls:stage}-deals
+        AttributeDefinitions:
+          - AttributeName: dealId
+            AttributeType: S
+          - AttributeName: location
+            AttributeType: S
+          - AttributeName: category
+            AttributeType: S
+          - AttributeName: timestamp
+            AttributeType: N
+        KeySchema:
+          - AttributeName: dealId
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: LocationCategoryIndex
+            KeySchema:
+              - AttributeName: location
+                KeyType: HASH
+              - AttributeName: category
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+          - IndexName: CategoryTimestampIndex
+            KeySchema:
+              - AttributeName: category
+                KeyType: HASH
+              - AttributeName: timestamp
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+        BillingMode: PAY_PER_REQUEST
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
+
+
