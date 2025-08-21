@@ -2,8 +2,14 @@ service: store-ai-bot
 
 frameworkVersion: '3'
 
-plugins:
-  - serverless-esbuild
+build:
+  esbuild:
+    bundle: true
+    minify: false
+    sourcemap: true
+    exclude: ['aws-sdk']
+    target: 'node20'
+    platform: 'node'
 
 provider:
   name: aws
@@ -14,9 +20,15 @@ provider:
     WHATSAPP_API_VERSION: v19.0
     POS_FASTAPI_BASE_URL: 'https://i5vux53zk8.execute-api.ap-southeast-1.amazonaws.com/dev'
     SESSION_TABLE_NAME: ${self:service}-${sls:stage}-sessions
+    ENHANCED_SESSION_TABLE_NAME: ${self:service}-${sls:stage}-enhanced-sessions
     DEALS_TABLE_NAME: ${self:service}-${sls:stage}-deals
+    RESTAURANT_TABLE_NAME: ${self:service}-${sls:stage}-restaurants
+    ALERT_TABLE_NAME: ${self:service}-${sls:stage}-alerts
     WEBHOOK_VERIFY_TOKEN: 'pasarnext'
     REPLICATE_API_TOKEN: 'r8_BYNZbnbXneg5HJUQWqSr4AyoFi10C0D4KuaiC'
+    VIDEO_PROCESSOR_URL: 'http://5.223.75.242:3000'
+    HETZNER_API_KEY: 'II1G1VrtLKZCsEsdCvwluHGz8a4a9NN7sLuvwHoKiZ0CVIfsUKA54ol38c1A2b1F'
+    S3_BUCKET_NAME: 'viral-agency-content'
     # Note: Sensitive tokens are fetched from DynamoDB at runtime
 
   iam:
@@ -30,17 +42,39 @@ provider:
             - "dynamodb:Query"
             - "dynamodb:Scan"
           Resource:
+            - "arn:aws:dynamodb:ap-southeast-1:${aws:accountId}:table/WhatsappStoreTokens"
             - "arn:aws:dynamodb:us-east-1:${aws:accountId}:table/WhatsappStoreTokens"
             - "arn:aws:dynamodb:us-east-1:${aws:accountId}:table/StoreProductsTable"
             - "arn:aws:dynamodb:us-east-1:${aws:accountId}:table/StorePosOrdersTable"
             - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:service}-${sls:stage}-sessions"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:service}-${sls:stage}-enhanced-sessions"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:service}-${sls:stage}-enhanced-sessions/index/*"
             - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:service}-${sls:stage}-deals"
             - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:service}-${sls:stage}-deals/index/*"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:service}-${sls:stage}-restaurants"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:service}-${sls:stage}-restaurants/index/*"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:service}-${sls:stage}-alerts"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:service}-${sls:stage}-alerts/index/*"
             - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/LobangLahUsers"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/ViralDeals"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/ViralDeals/index/*"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/RestaurantProfiles"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/RestaurantProfiles/index/*"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/SocialMediaConfig"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/ViralDiscoveries"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/ViralDiscoveries/index/*"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/HashtagMonitoring"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/ViralReports"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/RestaurantOwners"
         - Effect: "Allow"
           Action:
             - "s3:GetObject"
           Resource: "arn:aws:s3:::*/*" # Adjust if a more specific bucket is needed
+        - Effect: "Allow"
+          Action:
+            - "s3:PutObject"
+            - "s3:GetObject"
+          Resource: "arn:aws:s3:::viral-agency-content/*"
 
 
 functions:
@@ -52,6 +86,56 @@ functions:
       - httpApi:
           method: ANY
           path: /webhook
+      - httpApi:
+          method: POST
+          path: /test-webhook
+
+  dailyAlerts:
+    handler: src/handlers/dailyAlertsHandler.handleDailyAlerts
+    description: "Sends daily deal alerts to users within WhatsApp's 24-hour messaging window"
+    timeout: 300  # 5 minutes
+    events:
+      - schedule:
+          rate: cron(0 10 * * ? *)  # Run at 10 AM every day (UTC)
+          enabled: true
+          description: "Daily reminder at 10 AM to send today's deal"
+
+  # viralContentScraper:
+  #   handler: src/handlers/viralScraperScheduler.handler
+  #   description: "Scheduled viral content discovery and social media monitoring"
+  #   timeout: 900  # 15 minutes
+  #   environment:
+  #     GOOGLE_SEARCH_API_KEY: ${env:GOOGLE_SEARCH_API_KEY}
+  #     GOOGLE_SEARCH_TOKEN: ${env:GOOGLE_SEARCH_TOKEN}
+  #     OPENAI_API_KEY: ${env:OPENAI_API_KEY}
+  #   events:
+  #     - schedule:
+  #         rate: cron(0 */6 * * * ? *)  # Run every 6 hours for viral content discovery
+  #         enabled: true
+
+  # n8nPerformanceCallback:
+  #   handler: src/api/n8n/performance/route.POST
+  #   description: "Handle performance updates from N8N social media pipeline"
+  #   timeout: 60
+  #   environment:
+  #     N8N_API_KEY: ${env:N8N_API_KEY}
+  #     CALLBACK_BASE_URL: ${env:CALLBACK_BASE_URL}
+  #   events:
+  #       - httpApi:
+  #           method: POST
+  #           path: /api/n8n/performance
+
+  # n8nStatusCallback:
+  #   handler: src/api/n8n/status/route.POST
+  #   description: "Handle posting status updates from N8N social media pipeline"
+  #   timeout: 60
+  #   environment:
+  #     N8N_API_KEY: ${env:N8N_API_KEY}
+  #     CALLBACK_BASE_URL: ${env:CALLBACK_BASE_URL}
+  #   events:
+  #       - httpApi:
+  #           method: POST
+  #           path: /api/n8n/status
 
 resources:
   Resources:
@@ -66,6 +150,36 @@ resources:
           - AttributeName: sessionId
             KeyType: HASH
         BillingMode: PAY_PER_REQUEST
+    
+    EnhancedSessionsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${sls:stage}-enhanced-sessions
+        AttributeDefinitions:
+          - AttributeName: phoneNumber
+            AttributeType: S
+          - AttributeName: sessionId
+            AttributeType: S
+          - AttributeName: timestamp
+            AttributeType: S
+        KeySchema:
+          - AttributeName: phoneNumber
+            KeyType: HASH
+          - AttributeName: sessionId
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: SessionTimestampIndex
+            KeySchema:
+              - AttributeName: sessionId
+                KeyType: HASH
+              - AttributeName: timestamp
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+        BillingMode: PAY_PER_REQUEST
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
     
     DealsTable:
       Type: AWS::DynamoDB::Table
@@ -105,4 +219,74 @@ resources:
           AttributeName: ttl
           Enabled: true
 
+    RestaurantDetailsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${sls:stage}-restaurants
+        AttributeDefinitions:
+          - AttributeName: placeId
+            AttributeType: S
+          - AttributeName: name
+            AttributeType: S
+          - AttributeName: category
+            AttributeType: S
+          - AttributeName: lastUpdated
+            AttributeType: N
+        KeySchema:
+          - AttributeName: placeId
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: NameIndex
+            KeySchema:
+              - AttributeName: name
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+          - IndexName: CategoryIndex
+            KeySchema:
+              - AttributeName: category
+                KeyType: HASH
+              - AttributeName: lastUpdated
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+        BillingMode: PAY_PER_REQUEST
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
 
+    AlertsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${sls:stage}-alerts
+        AttributeDefinitions:
+          - AttributeName: alertId
+            AttributeType: S
+          - AttributeName: userId
+            AttributeType: S
+          - AttributeName: storeId
+            AttributeType: S
+          - AttributeName: nextSendTime
+            AttributeType: N
+        KeySchema:
+          - AttributeName: alertId
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: UserStoreIndex
+            KeySchema:
+              - AttributeName: userId
+                KeyType: HASH
+              - AttributeName: storeId
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+          - IndexName: NextSendTimeIndex
+            KeySchema:
+              - AttributeName: nextSendTime
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+        BillingMode: PAY_PER_REQUEST
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true

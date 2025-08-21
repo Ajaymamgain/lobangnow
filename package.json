@@ -3,18 +3,23 @@
   "version": "1.0.0",
   "description": "WhatsApp AI Bot for Serverless Framework",
   "main": "src/handlers/webhook.js",
-  "type": "module",
   "scripts": {
     "deploy:dev": "serverless deploy --stage dev",
-    "remove:dev": "serverless remove --stage dev"
+    "remove:dev": "serverless remove --stage dev",
+    "test:poster": "node test-deal-poster.js"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudwatch": "^3.863.0",
+    "@aws-sdk/client-cloudwatch-logs": "^3.863.0",
     "@aws-sdk/client-dynamodb": "^3.540.0",
     "@aws-sdk/client-s3": "^3.540.0",
+    "@aws-sdk/client-sns": "^3.863.0",
+    "@aws-sdk/lib-dynamodb": "^3.859.0",
     "@aws-sdk/util-dynamodb": "^3.540.0",
-    "axios": "^1.6.8",
+
     "openai": "^4.33.0",
     "pdfkit": "^0.15.0",
+    "replicate": "^1.0.1",
     "uuid": "^11.1.0"
   },
   "devDependencies": {

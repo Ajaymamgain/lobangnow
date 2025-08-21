@@ -23,10 +23,10 @@ export async function generatePlayfulSticker(context = 'general', botConfig, wea
                 steps: 17,
                 width: 1152,
                 height: 1152,
-                prompt: selectedPrompt,
+                prompt: selectedPrompt + ", transparent background, no background, clean sticker design",
                 output_format: "png",
                 output_quality: 100,
-                negative_prompt: "ugly, blurry, low quality, distorted, scary, inappropriate",
+                negative_prompt: "ugly, blurry, low quality, distorted, scary, inappropriate, white background, solid background, background",
                 number_of_images: 1
             }
         }, {
@@ -62,7 +62,7 @@ export async function generatePlayfulSticker(context = 'general', botConfig, wea
 /**
  * Generate personalized sticker prompt based on weather, location, and context
  */
-export function generatePersonalizedPrompt(context, weatherData,) {
+export function generatePersonalizedPrompt(context, weatherData, locationData) {
     // Extract weather and location details
     const weather = weatherData ? {
         condition: weatherData.description || weatherData.main || 'clear',
@@ -71,7 +71,11 @@ export function generatePersonalizedPrompt(context, weatherData,) {
         isDaytime: weatherData.isDaytime !== false // default to true if not specified
     } : null;
     
-    // Location data no longer used for sticker generation (simplified approach)
+    // Extract location details for sticker context
+    const location = locationData ? {
+        name: locationData.displayName || locationData.name || 'Singapore',
+        area: locationData.area || 'Singapore'
+    } : { name: 'Singapore', area: 'Singapore' };
 
     // Base character themes for different contexts
     const baseThemes = {
@@ -89,10 +93,15 @@ export function generatePersonalizedPrompt(context, weatherData,) {
 
     let baseCharacter = baseThemes[context] || baseThemes.welcome;
     
-    // Weather-based enhancements
+    // Weather-based enhancements with short form weather info
     let weatherEnhancement = "";
+    let weatherText = "";
     if (weather) {
         const weatherCondition = weather.condition.toLowerCase();
+        const temp = weather.temperature;
+        
+        // Create short weather text for sticker
+        weatherText = `${weather.emoji} ${temp}°C ${weather.condition}`;
         
         if (weatherCondition.includes('rain') || weatherCondition.includes('shower')) {
             weatherEnhancement = " holding a cute umbrella, raindrops around, cozy rainy mood";
@@ -119,8 +128,13 @@ export function generatePersonalizedPrompt(context, weatherData,) {
         ", bright and energetic daytime mood" : 
         ", calm and cozy evening mood";
     
-    // Combine all elements
-    const fullPrompt = `${baseCharacter}${weatherEnhancement}${locationEnhancement}${timeEnhancement}, kawaii style, high quality, cute and friendly, singapore theme, sticker design, clean background`;
+    // Combine all elements with weather info
+    let fullPrompt = `${baseCharacter}${weatherEnhancement}${locationEnhancement}${timeEnhancement}, kawaii style, high quality, cute and friendly, singapore theme, sticker design, clean background`;
+    
+    // Add weather text if available
+    if (weatherText) {
+        fullPrompt += `, weather info: ${weatherText}`;
+    }
     
     return fullPrompt;
 }
@@ -151,7 +165,7 @@ export function isUrbanArea(locationData) {
 /**
  * Send a sticker message via WhatsApp
  */
-export async function sendStickerMessage(storeId, phoneNumber, stickerUrl, botConfig) {
+export async function sendStickerMessage(storeId, phoneNumber, stickerUrl, botConfig, weatherData = null) {
     try {
         if (!stickerUrl) {
             console.log('[StickerUtils] No sticker URL provided, skipping sticker send');
@@ -169,15 +183,21 @@ export async function sendStickerMessage(storeId, phoneNumber, stickerUrl, botCo
         // Send sticker message as an image with caption for better visibility and engagement
         console.log(`[StickerUtils] Sending sticker message to ${phoneNumber} using URL: ${stickerUrl}`);
         
-        // Create a fun caption based on random selection
-        const funCaptions = [
-            "✨ I'm hunting for amazing deals near you! ✨",
-            "🎉 Finding the best deals just for you! 🎉",
-            "🌟 Deal detective at work! Stay tuned! 🌟",
-            "🔍 Searching for hidden gems nearby! 🔍",
-            "💫 Your personal deal finder is on the case! 💫"
-        ];
-        const caption = funCaptions[Math.floor(Math.random() * funCaptions.length)];
+        // Create a fun caption with weather info if available
+        let caption = "";
+        if (weatherData && weatherData.description && weatherData.temperature) {
+            const weatherInfo = `${weatherData.emoji || '🌤️'} ${weatherData.temperature}°C ${weatherData.description}`;
+            caption = `🌤️ ${weatherInfo} | 🔍 Hunting for amazing deals near you! ✨`;
+        } else {
+            const funCaptions = [
+                "✨ I'm hunting for amazing deals near you! ✨",
+                "🎉 Finding the best deals just for you! 🎉",
+                "🌟 Deal detective at work! Stay tuned! 🌟",
+                "🔍 Searching for hidden gems nearby! 🔍",
+                "💫 Your personal deal finder is on the case! 💫"
+            ];
+            caption = funCaptions[Math.floor(Math.random() * funCaptions.length)];
+        }
         
         const messageResponse = await axios.post(
             `https://graph.facebook.com/v19.0/${whatsappPhoneNumberId}/messages`,
@@ -216,19 +236,19 @@ export async function sendStickerMessage(storeId, phoneNumber, stickerUrl, botCo
 /**
  * Generate and send a contextual sticker with weather and location data (combines generation and sending)
  */
-export async function generateAndSendSticker(storeId, phoneNumber, context, botConfig, weatherData = null) {
+export async function generateAndSendSticker(storeId, phoneNumber, context, botConfig, weatherData = null, locationData = null) {
     try {
         console.log(`[StickerUtils] Generating and sending ${context} sticker to ${phoneNumber} with weather/location context`);
         
         // Generate the personalized sticker with weather and location context
-        const sticker = await generatePlayfulSticker(context, botConfig, weatherData);
+        const sticker = await generatePlayfulSticker(context, botConfig, weatherData, locationData);
         if (!sticker) {
             console.log('[StickerUtils] Sticker generation failed, skipping send');
             return false;
         }
 
-        // Send the sticker
-        const sent = await sendStickerMessage(storeId, phoneNumber, sticker.url, botConfig);
+        // Send the sticker with weather data
+        const sent = await sendStickerMessage(storeId, phoneNumber, sticker.url, botConfig, weatherData);
         if (sent) {
             console.log(`[StickerUtils] Successfully sent ${context} sticker to ${phoneNumber}:`, {
                 weather: sticker.weather,

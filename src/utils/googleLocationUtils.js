@@ -18,8 +18,10 @@ export async function searchNearbyPlaces(latitude, longitude, category, googleMa
         let includedTypes;
         if (category === 'food') {
             includedTypes = ['restaurant', 'meal_takeaway', 'bakery', 'cafe'];
-        } else if (category === 'clothes') {
+        } else if (category === 'fashion') {
             includedTypes = ['clothing_store', 'shoe_store', 'shopping_mall'];
+        } else if (category === 'events') {
+            includedTypes = ['amusement_park', 'aquarium', 'art_gallery', 'bowling_alley', 'casino', 'movie_theater', 'museum', 'night_club', 'park', 'stadium', 'tourist_attraction', 'zoo'];
         } else if (category === 'groceries') {
             includedTypes = ['grocery_or_supermarket', 'supermarket', 'convenience_store'];
         } else {
@@ -569,27 +571,68 @@ export function findMatchingPlace(businessName, nearbyPlaces) {
     );
     
     if (match) {
+        console.log(`[findMatchingPlace] Exact match found: "${businessName}" = "${match.name}"`);
         return match;
     }
     
-    // Try partial match (business name contains place name or vice versa)
+    // Try partial match with more flexible matching
+    // Only exclude very common words like "Singapore", but allow restaurant-related words
+    const veryCommonWords = ['singapore', 'sg', 'south', 'east', 'west', 'north', 'central'];
+    const businessWords = normalizedBusinessName.split(/\s+/).filter(word => 
+        word.length > 2 && !veryCommonWords.includes(word)
+    );
+    
     match = nearbyPlaces.find(place => {
         const placeName = place.name.toLowerCase().trim();
-        return normalizedBusinessName.includes(placeName) || placeName.includes(normalizedBusinessName);
+        const placeWords = placeName.split(/\s+/).filter(word => 
+            word.length > 2 && !veryCommonWords.includes(word)
+        );
+        
+        // Check if there's a significant word match
+        const hasSignificantMatch = businessWords.some(bWord => 
+            placeWords.some(pWord => 
+                (bWord.includes(pWord) || pWord.includes(bWord)) && 
+                bWord.length > 2 && pWord.length > 2
+            )
+        );
+        
+        if (hasSignificantMatch) {
+            console.log(`[findMatchingPlace] Significant word match: "${businessName}" (${businessWords}) = "${place.name}" (${placeWords})`);
+            return true;
+        }
+        
+        return false;
     });
     
     if (match) {
         return match;
     }
     
-    // Try fuzzy matching by checking if any significant words match
-    const businessWords = normalizedBusinessName.split(/\s+/).filter(word => word.length > 2);
+    // Last resort: try partial match but be very strict
     match = nearbyPlaces.find(place => {
-        const placeWords = place.name.toLowerCase().split(/\s+/).filter(word => word.length > 2);
-        return businessWords.some(bWord => placeWords.some(pWord => 
-            bWord.includes(pWord) || pWord.includes(bWord)
-        ));
+        const placeName = place.name.toLowerCase().trim();
+        // Only match if one name is a significant substring of the other
+        // and it's not just matching "Singapore" or other common words
+        const isSignificantMatch = (normalizedBusinessName.includes(placeName) && placeName.length > 5) || 
+                                 (placeName.includes(normalizedBusinessName) && normalizedBusinessName.length > 5);
+        
+        if (isSignificantMatch) {
+            console.log(`[findMatchingPlace] Significant substring match: "${businessName}" = "${place.name}"`);
+        }
+        
+        return isSignificantMatch;
     });
+    
+    if (!match) {
+        console.log(`[findMatchingPlace] No match found for "${businessName}" among ${nearbyPlaces.length} places`);
+        
+        // Fallback: use the first place with photos if available
+        const placeWithPhotos = nearbyPlaces.find(place => place.photos && place.photos.length > 0);
+        if (placeWithPhotos) {
+            console.log(`[findMatchingPlace] Using fallback place with photos: "${placeWithPhotos.name}"`);
+            return placeWithPhotos;
+        }
+    }
     
     return match || null;
 }

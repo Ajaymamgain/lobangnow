@@ -1,5 +1,5 @@
 // LobangLah WhatsApp Deals Bot Handler
-import { searchDealsWithOpenAI, createWelcomeMessage, createLocationMessage, saveUserProfile, getUserProfile, searchMoreDealsFromDynamoDB, createInteractiveSearchingMessage, getSharedDealIds, createIndividualDealMessages, addSharedDealIds } from '../utils/dealsUtils.js';
+import { searchDealsWithOpenAI, createWelcomeMessage, createLocationMessage, saveUserProfile, getUserProfile, searchMoreDealsFromDynamoDB, createInteractiveSearchingMessage, getSharedDealIds, addSharedDealIds } from '../utils/dealsUtils.js';
 import { createCatalogDealsMessage, cleanupOldDealsFromCatalog } from '../utils/catalogUtils.js';
 // Removed verifyDealsWithDeepSeek import as DeepSeek verification is now skipped
 import { enhanceDealsWithPhotos, createEnhancedDealMessages } from '../utils/enhancedDealUtils.js';
@@ -9,6 +9,11 @@ import { generateAndSendSticker } from '../utils/stickerUtils.js';
 import { DynamoDBClient, GetItemCommand, PutItemCommand } from '@aws-sdk/client-dynamodb';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import OpenAI from 'openai';
+import { getSingaporeErrorMessage, getSingaporeSuccessMessage, getWeatherBasedRecommendations, singaporeSlang, generateAISingaporeContent } from '../utils/singaporeFeatures.js';
+import { searchLocationByName, getLocationDetails, enhanceLocationSearchWithAI, createLocationSearchMessage, createLocationSearchPrompt, createPopularLocationsMessage } from '../utils/locationSearchUtils.js';
+import { getRestaurantMenu, createMenuMessage } from '../utils/googleMenuUtils.js';
+import { createIndividualDealMessages, createTopDealsMessage, createNavigationOptionsMessage, createContactUsMessage, createWhatElseMessage, createMenuRequestMessage, handleMenuButtonClick } from '../utils/dealNavigationUtils.js';
+import { createDailyAlert, getUserAlerts, createAlertSetupMessage, createAlertTimeSelectionMessage, createAlertConfirmationMessage, createAlertManagementMessage, deactivateAlert } from '../utils/alertUtils.js';
 
 // In-memory user state management (for conversation flow)
 const userStates = new Map();
@@ -350,6 +355,7 @@ async function searchAndSendMoreDeals(fromNumber, userState, botConfig, session)
                 await sendWhatsAppMessage(userState.storeId, fromNumber, catalogMessage, botConfig);
             }
             
+            
             // Optional: Clean up old deals from catalog to prevent clutter
             cleanupOldDealsFromCatalog(botConfig).catch(error => {
                 console.warn('[LobangLah] Catalog cleanup failed:', error);
@@ -471,18 +477,28 @@ export async function handleLobangLahMessage(storeId, fromNumber, messageBody, m
             selectedDeal: userState.selectedDeal
         };
 
-        // Send response if we have one (with deduplication)
-        if (response) {
-            await sendLobangLahMessage(storeId, fromNumber, response, botConfig, session);
-        }
-        
         // Update session timestamp and save to DynamoDB with user state
         session.lastInteraction = 'lobanglah_deals';
         session.timestamp = Date.now();
         await updateSession(storeId, fromNumber, session);
 
+        // Handle array of messages (individual deal messages)
+        if (Array.isArray(response)) {
+            console.log(`[LobangLah] Sending ${response.length} individual messages`);
+            for (const message of response) {
+                await sendLobangLahMessage(storeId, fromNumber, message, botConfig, session);
+            }
+            return response; // Return the array for testing
+        }
+
+        // Handle single message
+        if (response) {
+            console.log(`[LobangLah] Sending single message`);
+            await sendLobangLahMessage(storeId, fromNumber, response, botConfig, session);
+        }
+
         console.log(`[LobangLah] Successfully processed message from ${fromNumber}`);
-        return true; // Indicate successful handling to webhook
+        return response; // Return the actual response
 
     } catch (error) {
         console.error(`[LobangLah] Error handling message from ${fromNumber}:`, error);
@@ -606,27 +622,854 @@ function createInteractiveWelcomeMessage(userMessage) {
                         type: 'reply',
                         reply: {
                             id: 'share_location_prompt',
-                            title: '📍 Share Location'
+                            title: '📍 Share'
                         }
                     },
                     {
                         type: 'reply',
                         reply: {
-                            id: 'how_it_works',
-                            title: '❓ How It Works'
+                            id: 'search_location_prompt',
+                            title: '🔍 Search by Name'
                         }
                     },
                     {
                         type: 'reply',
                         reply: {
-                            id: 'about_lobangLah',
-                            title: '🎯 About Us'
+                            id: 'popular_places',
+                            title: '🏢 Popular Places'
                         }
                     }
                 ]
             }
         }
     };
+}
+
+/**
+ * Handle interactive messages (button/list selections)
+ */
+async function handleInteractiveMessage(storeId, fromNumber, interactiveData, userState, botConfig, session) {
+    const actionId = interactiveData.button_reply?.id || interactiveData.list_reply?.id;
+    console.log(`[LobangLah] Processing interactive action: ${actionId}`);
+    
+    // Add user interaction to conversation history
+    session.conversation.push({ role: 'user', content: `Selected: ${actionId}` });
+    
+    // Handle location sharing prompt
+    if (actionId === 'share_location_prompt') {
+        console.log(`[LobangLah] User clicked share location from welcome message`);
+        return {
+            type: "text",
+            text: {
+                body: "📍 Please share your location to find amazing deals near you!"
+            }
+        };
+    }
+    
+    // Handle how it works
+    if (actionId === 'how_it_works') {
+        return {
+            type: "text",
+            text: {
+                body: "🤖 **How LobangLah Works:**\n\n1️⃣ **Share Location** - Tell us where you are\n2️⃣ **Choose Category** - Food, fashion, events, etc.\n3️⃣ **Get Deals** - AI finds the best deals nearby\n4️⃣ **Chat & Explore** - Ask questions about deals\n\n🎯 **Smart Features:**\n• Real-time weather integration\n• Location-based recommendations\n• Deal deduplication (no repeats!)\n• Interactive catalog messages\n\n📍 Ready to start? Share your location!"
+            }
+        };
+    }
+    
+    // Handle about us
+    if (actionId === 'about_lobangLah') {
+        return {
+            type: "text",
+            text: {
+                body: "🎯 **About LobangLah:**\n\nWe're Singapore's smartest deal discovery platform! 🤖\n\n**What makes us special:**\n• AI-powered deal search\n• Real-time location & weather\n• Restaurant deduplication\n• Interactive WhatsApp experience\n\n💡 **Lobang** = Singaporean slang for 'good deal'\n\n📍 Let's find you some amazing lobangs!"
+            }
+        };
+    }
+    
+    // Handle search location prompt
+    if (actionId === 'search_location_prompt') {
+        userState.step = 'waiting_for_location_name';
+        return {
+            type: "text",
+            text: {
+                body: "🔍 **Search by Location Name**\n\nType the name of any Singapore location:\n\n📍 Examples:\n• Orchard Road\n• Marina Bay Sands\n• Bugis Junction\n• Tampines Mall\n• Jurong Point\n\n🌍 **Singapore locations only**"
+            }
+        };
+    }
+    
+    // Handle popular places
+    if (actionId === 'popular_places') {
+        return {
+            type: "interactive",
+            interactive: {
+                type: "button",
+                header: {
+                    type: "text",
+                    text: "🏢 Popular Singapore Locations"
+                },
+                body: {
+                    text: "Choose a popular location to find deals:"
+                },
+                footer: {
+                    text: "Select your preferred area"
+                },
+                action: {
+                    buttons: [
+                        {
+                            type: "reply",
+                            reply: {
+                                id: "popular_orchard_road",
+                                title: "🛍️ Orchard Road"
+                            }
+                        },
+                        {
+                            type: "reply",
+                            reply: {
+                                id: "popular_marina_bay",
+                                title: "🌆 Marina Bay"
+                            }
+                        },
+                        {
+                            type: "reply",
+                            reply: {
+                                id: "popular_bugis",
+                                title: "🏪 Bugis"
+                            }
+                        }
+                    ]
+                }
+            }
+        };
+    }
+    
+    // Handle popular location selections
+    if (actionId.startsWith('popular_')) {
+        const locationName = actionId.replace('popular_', '').replace(/_/g, ' ');
+        console.log(`[LobangLah] User selected popular location: ${locationName}`);
+        
+        // Search for this popular location
+        const googleMapsApiKey = botConfig?.googleMapsApiKey || process.env.GOOGLE_MAPS_API_KEY;
+        if (!googleMapsApiKey) {
+            console.log(`[LobangLah] No Google Maps API key found for popular location: ${locationName}`);
+            return {
+                type: "text",
+                text: {
+                    body: "❌ Sorry lah! Location service not available. Please try sharing your GPS location instead."
+                }
+            };
+        }
+        
+        console.log(`[LobangLah] Enhancing location name with AI: ${locationName}`);
+        // Enhance the location name with AI
+        const enhancedLocationName = await enhanceLocationSearchWithAI(locationName, botConfig);
+        console.log(`[LobangLah] Enhanced location name: ${enhancedLocationName}`);
+        
+        console.log(`[LobangLah] Searching for location: ${enhancedLocationName}`);
+        const suggestions = await searchLocationByName(enhancedLocationName, googleMapsApiKey, botConfig);
+        console.log(`[LobangLah] Found ${suggestions.length} suggestions for ${enhancedLocationName}`);
+        
+        if (suggestions.length === 0) {
+            console.log(`[LobangLah] No suggestions found for popular location: ${locationName}`);
+            return {
+                type: "text",
+                text: {
+                    body: `❌ Sorry lah! Couldn't find "${locationName}" in Singapore. Please try another location or share your GPS location.`
+                }
+            };
+        }
+        
+        // Use the first suggestion
+        const selectedSuggestion = suggestions[0];
+        console.log(`[LobangLah] Selected suggestion: ${selectedSuggestion.description}`);
+        
+        console.log(`[LobangLah] Getting location details for placeId: ${selectedSuggestion.placeId}`);
+        const locationDetails = await getLocationDetails(selectedSuggestion.placeId, googleMapsApiKey);
+        
+        if (!locationDetails) {
+            console.log(`[LobangLah] No location details found for placeId: ${selectedSuggestion.placeId}`);
+            return {
+                type: "text",
+                text: {
+                    body: "❌ Sorry lah! Couldn't get location details. Please try again or share your GPS location."
+                }
+            };
+        }
+        
+        console.log(`[LobangLah] Location details found: ${locationDetails.name}`);
+        
+        // Store location in user state
+        userState.location = {
+            type: 'popular_selected',
+            placeId: locationDetails.placeId,
+            displayName: locationDetails.name,
+            formattedAddress: locationDetails.formattedAddress,
+            latitude: locationDetails.latitude,
+            longitude: locationDetails.longitude,
+            area: locationDetails.area,
+            source: 'popular_location'
+        };
+        userState.step = 'location_confirmed';
+        
+        console.log(`[LobangLah] Creating consolidated message for popular location`);
+        // Create a more interactive message with location confirmation and category selection
+        const consolidatedMessage = {
+            type: 'interactive',
+            interactive: {
+                type: 'button',
+                header: {
+                    type: 'text',
+                    text: `📍 ${locationDetails.name}`
+                },
+                body: {
+                    text: `🎉 Great choice! I found ${locationDetails.name} in ${locationDetails.area || 'Singapore'}.\n\nWhat kind of amazing deals should I find for you today?`
+                },
+                footer: {
+                    text: 'Choose your deal category'
+                },
+                action: {
+                    buttons: [
+                        {
+                            type: 'reply',
+                            reply: {
+                                id: 'search_food_deals',
+                                title: '🍽️ Food & Dining'
+                            }
+                        },
+                        {
+                            type: 'reply',
+                            reply: {
+                                id: 'search_events_deals',
+                                title: '🎉 Events'
+                            }
+                        },
+                        {
+                            type: 'reply',
+                            reply: {
+                                id: 'search_fashion_deals',
+                                title: '👗 Fashion'
+                            }
+                        }
+                    ]
+                }
+            }
+        };
+        
+        // Save session
+        session.userState = userState;
+        session.lastInteraction = 'location_confirmed';
+        session.timestamp = Date.now();
+        await updateSession(storeId, fromNumber, session);
+        
+        return consolidatedMessage;
+    }
+    
+    // Handle deal category selections
+    if (actionId.startsWith('search_') && actionId.endsWith('_deals')) {
+        const category = actionId.replace('search_', '').replace('_deals', '');
+        console.log(`[LobangLah] User selected category: ${category}`);
+        
+        if (!userState.location) {
+            return {
+                type: "text",
+                text: {
+                    body: "❌ Please share your location first to find deals near you!"
+                }
+            };
+        }
+        
+        userState.category = category;
+        userState.step = 'searching_deals';
+        
+        // Save session
+        session.userState = userState;
+        session.lastInteraction = 'category_selected';
+        session.timestamp = Date.now();
+        await updateSession(storeId, fromNumber, session);
+        
+        // Search and send deals
+        return await searchAndSendDeals(storeId, fromNumber, userState, botConfig, session);
+    }
+    
+    // Handle more deals request
+    if (actionId === 'more_deals') {
+        console.log(`[LobangLah] User requested more deals`);
+        return await searchAndSendMoreDeals(fromNumber, userState, botConfig, session);
+    }
+    
+    // Handle chat AI button
+    if (actionId === 'chat_ai') {
+        console.log(`[LobangLah] User clicked Chat AI button`);
+        
+        if (!userState.lastDeals || userState.lastDeals.length === 0) {
+            return {
+                type: "text",
+                text: {
+                    body: "❌ No deals available to chat about. Please search for deals first!"
+                }
+            };
+        }
+        
+        userState.step = 'chat_mode';
+        userState.chatContext = {
+            deals: userState.lastDeals,
+            location: userState.location.displayName || userState.location.name || 'your location',
+            category: userState.category
+        };
+        userState.chatStartTime = Date.now();
+        userState.chatInteractionCount = 0;
+        
+        // Save session
+        session.userState = userState;
+        session.lastInteraction = 'chat_mode_started';
+        session.timestamp = Date.now();
+        await updateSession(storeId, fromNumber, session);
+        
+        return {
+            type: "text",
+            text: {
+                body: `🤖 **Chat AI Mode Activated!**\n\nI'm ready to help you with your ${userState.category} deals near ${userState.chatContext.location}!\n\n💬 **Ask me anything:**\n• "Which deal is best value?"\n• "Tell me about the first deal"\n• "What's closest to me?"\n• "Show me directions"\n• "More deals please"\n\n🎯 I'll help you make the best choice!\n\n💡 Type "exit chat" to end chat mode.`
+            }
+        };
+    }
+    
+    // Handle setup daily alert button
+    if (actionId === 'setup_alert') {
+        console.log(`[LobangLah] User clicked setup alert button`);
+        
+        if (!userState.location || !userState.category) {
+            return {
+                type: "text",
+                text: {
+                    body: "❌ Please search for deals first to set up daily alerts!"
+                }
+            };
+        }
+        
+        userState.step = 'alert_setup';
+        
+        // Save session
+        session.userState = userState;
+        session.lastInteraction = 'alert_setup_started';
+        session.timestamp = Date.now();
+        await updateSession(storeId, fromNumber, session);
+        
+        return createAlertSetupMessage();
+    }
+    
+    // Handle alert time selection
+    if (actionId.startsWith('alert_time_')) {
+        const time = actionId.replace('alert_time_', '');
+        console.log(`[LobangLah] User selected alert time: ${time}`);
+        
+        userState.preferredTime = time;
+        userState.step = 'alert_confirmation';
+        
+        // Save session
+        session.userState = userState;
+        session.lastInteraction = 'alert_time_selected';
+        session.timestamp = Date.now();
+        await updateSession(storeId, fromNumber, session);
+        
+        return createAlertConfirmationMessage({
+            location: userState.location,
+            category: userState.category,
+            preferredTime: time,
+            phoneNumber: fromNumber,
+            storeId: storeId
+        });
+    }
+    
+    // Handle alert confirmation
+    if (actionId === 'confirm_alert') {
+        console.log(`[LobangLah] User confirmed alert setup`);
+        
+        try {
+            // Create the daily alert
+            const alertData = {
+                userId: fromNumber,
+                phoneNumber: fromNumber,
+                storeId: storeId,
+                location: userState.location,
+                category: userState.category,
+                preferredTime: userState.preferredTime || '09:00',
+                timezone: 'Asia/Singapore'
+            };
+            
+            const alert = await createDailyAlert(alertData);
+            
+            userState.step = 'alert_created';
+            
+            // Save session
+            session.userState = userState;
+            session.lastInteraction = 'alert_created';
+            session.timestamp = Date.now();
+            await updateSession(storeId, fromNumber, session);
+            
+            return {
+                type: "text",
+                text: {
+                    body: `🔔 **Daily Alert Created!**\n\n✅ You'll receive daily ${userState.category} deals near ${userState.location.displayName} at ${userState.preferredTime}.\n\n📱 **Alert Details:**\n• Location: ${userState.location.displayName}\n• Category: ${userState.category}\n• Time: ${userState.preferredTime}\n• Status: Active\n\n💡 Type "manage alerts" to view or modify your alerts.`
+                }
+            };
+            
+        } catch (error) {
+            console.error(`[LobangLah] Error creating alert:`, error);
+            return {
+                type: "text",
+                text: {
+                    body: "❌ Sorry lah! I had trouble setting up your daily alert. Please try again later."
+                }
+            };
+        }
+    }
+    
+    // Handle manage alerts
+    if (actionId === 'manage_alerts') {
+        console.log(`[LobangLah] User clicked manage alerts`);
+        
+        try {
+            const alerts = await getUserAlerts(fromNumber, storeId);
+            
+            if (alerts.length === 0) {
+                return {
+                    type: "text",
+                    text: {
+                        body: "📱 **No Active Alerts**\n\nYou don't have any daily alerts set up yet.\n\n💡 To create an alert:\n1. Search for deals in your preferred location\n2. Click 'Set Daily Alert' button\n3. Choose your preferred time\n\n🔔 Daily alerts will send you the best deals automatically!"
+                    }
+                };
+            }
+            
+            return await createAlertManagementMessage(fromNumber, storeId);
+            
+        } catch (error) {
+            console.error(`[LobangLah] Error getting user alerts:`, error);
+            return {
+                type: "text",
+                text: {
+                    body: "❌ Sorry lah! I had trouble loading your alerts. Please try again later."
+                }
+            };
+        }
+    }
+    
+    // Handle deactivate alert
+    if (actionId.startsWith('deactivate_alert_')) {
+        const alertId = actionId.replace('deactivate_alert_', '');
+        console.log(`[LobangLah] User deactivating alert: ${alertId}`);
+        
+        try {
+            await deactivateAlert(alertId);
+            
+            return {
+                type: "text",
+                text: {
+                    body: "🔕 **Alert Deactivated**\n\n✅ Your daily alert has been turned off.\n\n💡 You can set up new alerts anytime by searching for deals and clicking 'Set Daily Alert'."
+                }
+            };
+            
+        } catch (error) {
+            console.error(`[LobangLah] Error deactivating alert:`, error);
+            return {
+                type: "text",
+                text: {
+                    body: "❌ Sorry lah! I had trouble deactivating your alert. Please try again later."
+                }
+            };
+        }
+    }
+    
+    // Handle location selection from search results
+    if (actionId.startsWith('select_location_')) {
+        const placeId = actionId.replace('select_location_', '');
+        console.log(`[LobangLah] User selected location with placeId: ${placeId}`);
+        
+        const googleMapsApiKey = botConfig?.googleMapsApiKey || process.env.GOOGLE_MAPS_API_KEY;
+        if (!googleMapsApiKey) {
+            return {
+                type: "text",
+                text: {
+                    body: "❌ Sorry lah! Location service not available. Please try sharing your GPS location instead."
+                }
+            };
+        }
+        
+        try {
+            const locationDetails = await getLocationDetails(placeId, googleMapsApiKey);
+            
+            if (!locationDetails) {
+                return {
+                    type: "text",
+                    text: {
+                        body: "❌ Sorry lah! Couldn't get location details. Please try again."
+                    }
+                };
+            }
+            
+            // Store location in user state
+            userState.location = {
+                type: 'search_selected',
+                placeId: locationDetails.placeId,
+                displayName: locationDetails.name,
+                formattedAddress: locationDetails.formattedAddress,
+                latitude: locationDetails.latitude,
+                longitude: locationDetails.longitude,
+                area: locationDetails.area,
+                source: 'location_search'
+            };
+            userState.step = 'location_confirmed';
+            
+            // Create category selection message
+            const categoryMessage = {
+                type: 'interactive',
+                interactive: {
+                    type: 'button',
+                    header: {
+                        type: 'text',
+                        text: `📍 ${locationDetails.name}`
+                    },
+                    body: {
+                        text: `🎉 Perfect! I found ${locationDetails.name} in ${locationDetails.area || 'Singapore'}.\n\nWhat kind of amazing deals should I find for you today?`
+                    },
+                    footer: {
+                        text: 'Choose your deal category'
+                    },
+                    action: {
+                        buttons: [
+                            {
+                                type: 'reply',
+                                reply: {
+                                    id: 'search_food_deals',
+                                    title: '🍽️ Food & Dining'
+                                }
+                            },
+                            {
+                                type: 'reply',
+                                reply: {
+                                    id: 'search_events_deals',
+                                    title: '🎉 Events'
+                                }
+                            },
+                            {
+                                type: 'reply',
+                                reply: {
+                                    id: 'search_fashion_deals',
+                                    title: '👗 Fashion'
+                                }
+                            }
+                        ]
+                    }
+                }
+            };
+            
+            // Save session
+            session.userState = userState;
+            session.lastInteraction = 'location_confirmed';
+            session.timestamp = Date.now();
+            await updateSession(storeId, fromNumber, session);
+            
+            return categoryMessage;
+            
+        } catch (error) {
+            console.error(`[LobangLah] Error getting location details:`, error);
+            return {
+                type: "text",
+                text: {
+                    body: "❌ Sorry lah! I had trouble getting location details. Please try again or share your GPS location."
+                }
+            };
+        }
+    }
+    
+    // Default: Show welcome message
+    return createWelcomeMessage();
+}
+
+/**
+ * Handle location messages with Google Maps + Weather integration
+ */
+async function handleLocationMessage(storeId, fromNumber, locationData, userState, botConfig, session) {
+    console.log(`[LobangLah] Processing location message with Google + Weather:`, locationData);
+    
+    // Add user location to conversation history
+    session.conversation.push({ role: 'user', content: `Shared location: ${locationData.latitude}, ${locationData.longitude}` });
+    
+    try {
+        // Get location details from Google Maps API
+        const googleMapsApiKey = botConfig?.googleMapsApiKey || process.env.GOOGLE_MAPS_API_KEY;
+        let locationResult = null;
+        
+        if (googleMapsApiKey) {
+            try {
+                // Reverse geocode to get location name
+                const { searchNearbyPlaces } = await import('../utils/googleLocationUtils.js');
+                const nearbyPlaces = await searchNearbyPlaces(locationData.latitude, locationData.longitude, googleMapsApiKey);
+                
+                if (nearbyPlaces && nearbyPlaces.length > 0) {
+                    const nearestPlace = nearbyPlaces[0];
+                    locationResult = {
+                        displayName: nearestPlace.displayName?.text || nearestPlace.displayName || 'Your Location',
+                        latitude: locationData.latitude,
+                        longitude: locationData.longitude,
+                        area: nearestPlace.area || 'Singapore',
+                        source: 'gps_with_google'
+                    };
+                }
+            } catch (error) {
+                console.log(`[LobangLah] Google Maps API error, using basic location:`, error.message);
+            }
+        }
+        
+        // Fallback to basic location if Google Maps fails
+        if (!locationResult) {
+            locationResult = {
+                displayName: 'Your Location',
+                latitude: locationData.latitude,
+                longitude: locationData.longitude,
+                area: 'Singapore',
+                source: 'gps_basic'
+            };
+        }
+        
+        // Store location in user state
+        userState.location = {
+            type: 'gps',
+            latitude: locationData.latitude,
+            longitude: locationData.longitude,
+            displayName: locationResult.displayName,
+            area: locationResult.area,
+            source: 'gps'
+        };
+        userState.step = 'location_confirmed';
+        
+        console.log(`[LobangLah] Location stored: ${locationResult.displayName} (${locationData.latitude}, ${locationData.longitude})`);
+        
+        // Generate location weather message
+        const locationWeatherMessage = await generateLocationWeatherMessage(locationResult, botConfig);
+        
+        // Create category selection message
+        const categoryMessage = {
+            type: 'interactive',
+            interactive: {
+                type: 'button',
+                header: {
+                    type: 'text',
+                    text: `📍 ${locationResult.displayName}`
+                },
+                body: {
+                    text: `🎉 Location confirmed! I found ${locationResult.displayName} in ${locationResult.area}.\n\nWhat kind of amazing deals should I find for you today?`
+                },
+                footer: {
+                    text: 'Choose your deal category'
+                },
+                action: {
+                    buttons: [
+                        {
+                            type: 'reply',
+                            reply: {
+                                id: 'search_food_deals',
+                                title: '🍽️ Food & Dining'
+                            }
+                        },
+                        {
+                            type: 'reply',
+                            reply: {
+                                id: 'search_events_deals',
+                                title: '🎉 Events'
+                            }
+                        },
+                        {
+                            type: 'reply',
+                            reply: {
+                                id: 'search_fashion_deals',
+                                title: '👗 Fashion'
+                            }
+                        }
+                    ]
+                }
+            }
+        };
+        
+        // Save session
+        session.userState = userState;
+        session.lastInteraction = 'location_confirmed';
+        session.timestamp = Date.now();
+        await updateSession(storeId, fromNumber, session);
+        
+        return categoryMessage;
+        
+    } catch (error) {
+        console.error(`[LobangLah] Error handling location message:`, error);
+        return {
+            type: "text",
+            text: {
+                body: "❌ Sorry, I had trouble processing your location. Please try again!"
+            }
+        };
+    }
+}
+
+/**
+ * Generate location weather message
+ */
+async function generateLocationWeatherMessage(locationResult, botConfig) {
+    try {
+        // Try to get weather data
+        const weatherApiKey = botConfig?.weatherApiKey || process.env.WEATHER_API_KEY;
+        if (weatherApiKey && locationResult.latitude && locationResult.longitude) {
+            try {
+                const { getWeatherData } = await import('../utils/weatherUtils.js');
+                const weatherData = await getWeatherData(locationResult.latitude, locationResult.longitude, weatherApiKey);
+                
+                if (weatherData) {
+                    return {
+                        type: "text",
+                        text: {
+                            body: `📍 **Location:** ${locationResult.displayName}\n🌡️ **Weather:** ${weatherData.current.temp_c}°C, ${weatherData.current.condition.text}\n💨 **Wind:** ${weatherData.current.wind_kph} km/h\n💧 **Humidity:** ${weatherData.current.humidity}%\n\n🎯 Perfect weather for deal hunting!`
+                        }
+                    };
+                }
+            } catch (error) {
+                console.log(`[LobangLah] Weather API error, using fallback:`, error.message);
+            }
+        }
+        
+        // Fallback without weather
+        return createFallbackLocationWeatherMessage(locationResult);
+        
+    } catch (error) {
+        console.error(`[LobangLah] Error generating location weather message:`, error);
+        return createFallbackLocationWeatherMessage(locationResult);
+    }
+}
+
+/**
+ * Create fallback location weather message
+ */
+function createFallbackLocationWeatherMessage(locationResult) {
+    return {
+        type: "text",
+        text: {
+            body: `📍 **Location confirmed:** ${locationResult.displayName}\n\n🎯 Ready to find amazing deals near you!`
+        }
+    };
+}
+
+/**
+ * Search and send deals
+ */
+async function searchAndSendDeals(storeId, fromNumber, userState, botConfig, session) {
+    try {
+        console.log(`[LobangLah] Searching for ${userState.category} deals near ${userState.location.displayName}`);
+        
+        // Send immediate acknowledgment
+        const acknowledgmentMessage = {
+            type: "text",
+            text: {
+                body: "🔍 Searching for amazing deals... This may take a moment! ⏳"
+            }
+        };
+        
+        await sendWhatsAppMessage(storeId, fromNumber, acknowledgmentMessage, botConfig);
+        
+        // Search for deals using OpenAI and Google Places
+        const { searchDealsWithOpenAI } = await import('../utils/dealsUtils.js');
+        const deals = await searchDealsWithOpenAI(userState.location, userState.category, botConfig);
+        
+        if (deals && deals.length > 0) {
+            // Store deals in user state for chat context
+            userState.lastDeals = deals;
+            userState.step = 'deals_shown';
+            
+            // Save user state to session for persistence
+            session.userState = userState;
+            session.lastInteraction = 'deals_shown';
+            session.timestamp = Date.now();
+            
+            console.log(`[LobangLah] Saving session with user state:`, {
+                hasLastDeals: !!session.userState.lastDeals,
+                dealsCount: session.userState.lastDeals?.length || 0,
+                hasLocation: !!session.userState.location,
+                hasCategory: !!session.userState.category,
+                step: session.userState.step
+            });
+            
+            // Update session in DynamoDB
+            await updateSession(storeId, fromNumber, session);
+            
+            // Create catalog-based product list message (single message with all deals)
+            const { createCatalogDealsMessage } = await import('../utils/catalogUtils.js');
+            const catalogMessages = await createCatalogDealsMessage(deals, userState.category, botConfig);
+            
+            for (const catalogMessage of catalogMessages) {
+                await sendWhatsAppMessage(storeId, fromNumber, catalogMessage, botConfig);
+            }
+            
+            
+            // Send follow-up interactive message
+            const followUpMessage = {
+                type: 'interactive',
+                interactive: {
+                    type: 'button',
+                    header: {
+                        type: 'text',
+                        text: `🎉 Found ${deals.length} ${userState.category} deals!`
+                    },
+                    body: {
+                        text: `I found ${deals.length} amazing ${userState.category} deals near ${userState.location.displayName}!\n\n💬 Want to chat about these deals, find more, or set up daily alerts?`
+                    },
+                    footer: {
+                        text: 'Choose an option'
+                    },
+                    action: {
+                        buttons: [
+                            {
+                                type: 'reply',
+                                reply: {
+                                    id: 'chat_ai',
+                                    title: '🤖 Chat AI'
+                                }
+                            },
+                            {
+                                type: 'reply',
+                                reply: {
+                                    id: 'more_deals',
+                                    title: '🔍 More Deals'
+                                }
+                            },
+                            {
+                                type: 'reply',
+                                reply: {
+                                    id: 'setup_alert',
+                                    title: '🔔 Set Daily Alert'
+                                }
+                            }
+                        ]
+                    }
+                }
+            };
+            
+            await sendWhatsAppMessage(storeId, fromNumber, followUpMessage, botConfig);
+            
+            console.log(`[LobangLah] Successfully sent ${catalogMessages.length} catalog deal messages and follow-up`);
+            return null; // Return null since we've sent multiple messages
+        } else {
+            console.log(`[LobangLah] No deals found`);
+            return {
+                type: "text",
+                text: {
+                    body: "😅 Sorry, I couldn't find any deals at the moment. Please try a different category or location!"
+                }
+            };
+        }
+    } catch (error) {
+        console.error(`[LobangLah] Error searching deals:`, error);
+        return {
+            type: "text",
+            text: {
+                body: "❌ Sorry, I had trouble searching for deals. Please try again in a moment!"
+            }
+        };
+    }
 }
 
 /**
@@ -637,6 +1480,453 @@ async function handleTextMessage(storeId, fromNumber, messageBody, userState, bo
     
     // Add user message to conversation history
     session.conversation.push({ role: 'user', content: messageBody });
+    
+    // Check if this is a genuine first message or a continuation
+    const isFirstMessage = session.conversation.length <= 1;
+    const isGreeting = /^(hi|hello|hey|good morning|good afternoon|good evening|sup|yo|greetings)$/i.test(messageBody.trim());
+    
+    // If this is a first message with a greeting, show welcome message regardless of state
+    if (isFirstMessage && isGreeting) {
+        console.log(`[LobangLah] First greeting message detected: "${messageBody}"`);
+        userState.step = 'welcome';
+        return createConsistentWelcomeMessage(messageBody);
+    }
+    
+    // If user sends a greeting and has been inactive for a while, reset to welcome
+    if (isGreeting && userState.step !== 'welcome') {
+        const lastActivity = session.timestamp || 0;
+        const timeSinceLastActivity = Date.now() - lastActivity;
+        const thirtyMinutes = 30 * 60 * 1000; // 30 minutes in milliseconds
+        
+        if (timeSinceLastActivity > thirtyMinutes) {
+            console.log(`[LobangLah] User greeting after ${Math.round(timeSinceLastActivity / 60000)} minutes, resetting to welcome`);
+            userState.step = 'welcome';
+            userState.location = null;
+            userState.category = null;
+            userState.lastDeals = null;
+            userState.chatContext = null;
+            return createConsistentWelcomeMessage(messageBody);
+        }
+    }
+    
+    // Handle popular locations prompt response
+    if (userState.step === 'popular_locations_prompt') {
+        console.log(`[LobangLah] Processing popular locations response: "${messageBody}"`);
+        
+        // Treat any text as a location search when in popular locations flow
+        userState.step = 'location_search';
+        
+        // Enhance the search query with AI
+        const enhancedQuery = await enhanceLocationSearchWithAI(messageBody, botConfig);
+        console.log(`[LobangLah] Enhanced query: "${enhancedQuery}"`);
+        
+        // Search for locations
+        const googleMapsApiKey = botConfig?.googleMapsApiKey || process.env.GOOGLE_MAPS_API_KEY;
+        if (!googleMapsApiKey) {
+            return {
+                type: "text",
+                text: {
+                    body: "❌ Sorry lah! Location service not available. Please try sharing your GPS location instead."
+                }
+            };
+        }
+        
+        console.log(`[LobangLah] Searching for location: "${enhancedQuery}"`);
+        let suggestions;
+        try {
+            suggestions = await searchLocationByName(enhancedQuery, googleMapsApiKey, botConfig);
+            console.log(`[LobangLah] Found ${suggestions.length} suggestions`);
+        } catch (error) {
+            if (error.message === 'Location not in Singapore') {
+                return {
+                    type: "interactive",
+                    interactive: {
+                        type: "button",
+                        header: {
+                            type: "text",
+                            text: "🌍 Singapore Only"
+                        },
+                        body: {
+                            text: `📍 "${messageBody}" is not a Singapore location.\n\n🌍 **This bot only works in Singapore.**\n\nPlease try a Singapore location or share your GPS location.`
+                        },
+                        footer: {
+                            text: "Choose an option"
+                        },
+                        action: {
+                            buttons: [
+                                {
+                                    type: "reply",
+                                    reply: {
+                                        id: "share_location_prompt",
+                                        title: "📍 Share"
+                                    }
+                                },
+                                {
+                                    type: "reply",
+                                    reply: {
+                                        id: "search_location_prompt",
+                                        title: "🔍 Search"
+                                    }
+                                },
+                                {
+                                    type: "reply",
+                                    reply: {
+                                        id: "popular_places",
+                                        title: "🏢 Popular Places"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                };
+            }
+            throw error;
+        }
+        
+        if (suggestions.length === 0) {
+            return {
+                type: "interactive",
+                interactive: {
+                    type: "button",
+                    header: {
+                        type: "text",
+                        text: "🔍 Location Not Found"
+                    },
+                    body: {
+                        text: `❌ Sorry lah! Couldn't find "${messageBody}" in Singapore.\n\n🌍 **This bot only works in Singapore.**\n\nPlease try a different approach.`
+                    },
+                    footer: {
+                        text: "Choose an option"
+                    },
+                    action: {
+                        buttons: [
+                            {
+                                type: "reply",
+                                reply: {
+                                    id: "share_location_prompt",
+                                    title: "📍 Share"
+                                }
+                            },
+                            {
+                                type: "reply",
+                                reply: {
+                                    id: "search_location_prompt",
+                                    title: "🔍 Search"
+                                }
+                            },
+                            {
+                                type: "reply",
+                                reply: {
+                                    id: "popular_places",
+                                    title: "🏢 Popular Places"
+                                }
+                            }
+                        ]
+                    }
+                }
+            };
+        }
+        
+        // Create search results message
+        const { createLocationSearchMessage } = await import('../utils/locationSearchUtils.js');
+        const searchMessage = createLocationSearchMessage(enhancedQuery, suggestions);
+        
+        // Add to conversation history
+        session.conversation.push({ role: 'assistant', content: `Searching for: ${enhancedQuery}` });
+        
+        // Save session
+        session.userState = userState;
+        session.lastInteraction = 'location_search_results';
+        session.timestamp = Date.now();
+        await updateSession(storeId, fromNumber, session);
+        
+        return searchMessage;
+    }
+    
+    // Handle waiting for location name input (from search_location_text button)
+    if (userState.step === 'waiting_for_location_name') {
+        console.log(`[LobangLah] Processing location name input: "${messageBody}"`);
+        
+        // Clear the search session
+        userState.searchSession = null;
+        userState.step = 'location_search';
+        
+        // Enhance the search query with AI
+        const enhancedQuery = await enhanceLocationSearchWithAI(messageBody, botConfig);
+        console.log(`[LobangLah] Enhanced query: "${enhancedQuery}"`);
+        
+        // Search for locations using combination of AI and Google Maps API
+        const googleMapsApiKey = botConfig?.googleMapsApiKey || process.env.GOOGLE_MAPS_API_KEY;
+        if (!googleMapsApiKey) {
+            return {
+                type: "text",
+                text: {
+                    body: "❌ Sorry lah! Location service not available. Please try sharing your GPS location instead."
+                }
+            };
+        }
+        
+        console.log(`[LobangLah] Searching for location: "${enhancedQuery}"`);
+        let suggestions;
+        try {
+            suggestions = await searchLocationByName(enhancedQuery, googleMapsApiKey, botConfig);
+            console.log(`[LobangLah] Found ${suggestions.length} suggestions`);
+        } catch (error) {
+            if (error.message === 'Location not in Singapore') {
+                return {
+                    type: "interactive",
+                    interactive: {
+                        type: "button",
+                        header: {
+                            type: "text",
+                            text: "🌍 Singapore Only"
+                        },
+                        body: {
+                            text: `📍 "${messageBody}" is not a Singapore location.\n\n🌍 **This bot only works in Singapore.**\n\nPlease try a Singapore location or share your GPS location.`
+                        },
+                        footer: {
+                            text: "Choose an option"
+                        },
+                        action: {
+                            buttons: [
+                                {
+                                    type: "reply",
+                                    reply: {
+                                        id: "share_location_prompt",
+                                        title: "📍 Share"
+                                    }
+                                },
+                                {
+                                    type: "reply",
+                                    reply: {
+                                        id: "search_location_prompt",
+                                        title: "🔍 Search"
+                                    }
+                                },
+                                {
+                                    type: "reply",
+                                    reply: {
+                                        id: "popular_places",
+                                        title: "🏢 Popular Places"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                };
+            }
+            throw error;
+        }
+        
+        if (suggestions.length === 0) {
+            return {
+                type: "interactive",
+                interactive: {
+                    type: "button",
+                    header: {
+                        type: "text",
+                        text: "🔍 Location Not Found"
+                    },
+                    body: {
+                        text: `❌ Sorry lah! Couldn't find "${messageBody}" in Singapore.\n\n🌍 **This bot only works in Singapore.**\n\nPlease try a different approach.`
+                    },
+                    footer: {
+                        text: "Choose an option"
+                    },
+                    action: {
+                        buttons: [
+                            {
+                                type: "reply",
+                                reply: {
+                                    id: "share_location_prompt",
+                                    title: "📍 Share"
+                                }
+                            },
+                            {
+                                type: "reply",
+                                reply: {
+                                    id: "search_location_prompt",
+                                    title: "🔍 Search"
+                                }
+                            },
+                            {
+                                type: "reply",
+                                reply: {
+                                    id: "popular_places",
+                                    title: "🏢 Popular Places"
+                                }
+                            }
+                        ]
+                    }
+                }
+            };
+        }
+        
+        // Create search results message
+        const { createLocationSearchMessage } = await import('../utils/locationSearchUtils.js');
+        const searchMessage = createLocationSearchMessage(enhancedQuery, suggestions);
+        
+        // Add to conversation history
+        session.conversation.push({ role: 'assistant', content: `Searching for: ${enhancedQuery}` });
+        
+        // Save session
+        session.userState = userState;
+        session.lastInteraction = 'location_search_results';
+        session.timestamp = Date.now();
+        await updateSession(storeId, fromNumber, session);
+        
+        return searchMessage;
+    }
+    
+    // Handle general location search queries (only when not in a specific session)
+    if ((userState.step === 'welcome' || userState.step === 'location_search') && !userState.searchSession) {
+        console.log(`[LobangLah] Processing general location search query: "${messageBody}"`);
+        
+        // Check if this looks like a location search (more comprehensive)
+        const locationKeywords = [
+            'orchard', 'marina', 'chinatown', 'bugis', 'tampines', 'jurong', 'woodlands', 
+            'mall', 'shopping', 'restaurant', 'food', 'area', 'place', 'location', 'street',
+            'road', 'avenue', 'junction', 'plaza', 'center', 'centre', 'terminal', 'station',
+            'mrt', 'lrt', 'bus', 'park', 'garden', 'beach', 'harbour', 'harbor', 'bay',
+            'river', 'bridge', 'tower', 'building', 'hotel', 'resort', 'club', 'bar',
+            'cafe', 'coffee', 'tea', 'bakery', 'market', 'hawker', 'food court', 'deals',
+            'discount', 'offer', 'promotion', 'sale', 'cheap', 'budget', 'save', 'lobang'
+        ];
+        
+        const isLocationQuery = locationKeywords.some(keyword => messageBody.toLowerCase().includes(keyword)) || 
+                               (messageBody.length > 2 && messageBody.length < 100 && 
+                                !messageBody.toLowerCase().includes('hello') && 
+                                !messageBody.toLowerCase().includes('hi') && 
+                                !messageBody.toLowerCase().includes('help'));
+        
+        if (isLocationQuery) {
+            console.log(`[LobangLah] Detected location search query: "${messageBody}"`);
+            userState.step = 'location_search';
+            
+            // Enhance the search query with AI
+            const enhancedQuery = await enhanceLocationSearchWithAI(messageBody, botConfig);
+            console.log(`[LobangLah] Enhanced query: "${enhancedQuery}"`);
+            
+            // Search for locations
+            const googleMapsApiKey = botConfig?.googleMapsApiKey || process.env.GOOGLE_MAPS_API_KEY;
+            if (!googleMapsApiKey) {
+                console.log(`[LobangLah] No Google Maps API key found`);
+                return {
+                    type: "text",
+                    text: {
+                        body: "❌ Sorry lah! Location service not available. Please try sharing your GPS location instead."
+                    }
+                };
+            }
+            
+            try {
+                const suggestions = await searchLocationByName(enhancedQuery, googleMapsApiKey, botConfig);
+                console.log(`[LobangLah] Found ${suggestions.length} suggestions for "${enhancedQuery}"`);
+                
+                if (suggestions.length === 0) {
+                    return {
+                        type: "interactive",
+                        interactive: {
+                            type: "button",
+                            header: {
+                                type: "text",
+                                text: "🔍 Location Not Found"
+                            },
+                            body: {
+                                text: `❌ Sorry lah! Couldn't find "${messageBody}" in Singapore.\n\n🌍 **This bot only works in Singapore.**\n\nPlease try a different approach.`
+                            },
+                            footer: {
+                                text: "Choose an option"
+                            },
+                            action: {
+                                buttons: [
+                                    {
+                                        type: "reply",
+                                        reply: {
+                                            id: "share_location_prompt",
+                                            title: "📍 Share"
+                                        }
+                                    },
+                                    {
+                                        type: "reply",
+                                        reply: {
+                                            id: "search_location_prompt",
+                                            title: "🔍 Search"
+                                        }
+                                    },
+                                    {
+                                        type: "reply",
+                                        reply: {
+                                            id: "popular_places",
+                                            title: "🏢 Popular Places"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    };
+                }
+                
+                // Create location search results message
+                const { createLocationSearchMessage } = await import('../utils/locationSearchUtils.js');
+                const locationMessage = createLocationSearchMessage(enhancedQuery, suggestions);
+                
+                // Save session
+                session.userState = userState;
+                session.lastInteraction = 'location_search_results';
+                session.timestamp = Date.now();
+                await updateSession(storeId, fromNumber, session);
+                
+                return locationMessage;
+                
+            } catch (error) {
+                if (error.message === 'Location not in Singapore') {
+                    return {
+                        type: "interactive",
+                        interactive: {
+                            type: "button",
+                            header: {
+                                type: "text",
+                                text: "🌍 Singapore Only"
+                            },
+                            body: {
+                                text: `📍 "${messageBody}" is not a Singapore location.\n\n🌍 **This bot only works in Singapore.**\n\nPlease try a Singapore location or share your GPS location.`
+                            },
+                            footer: {
+                                text: "Choose an option"
+                            },
+                            action: {
+                                buttons: [
+                                    {
+                                        type: "reply",
+                                        reply: {
+                                            id: "share_location_prompt",
+                                            title: "📍 Share"
+                                        }
+                                    },
+                                    {
+                                        type: "reply",
+                                        reply: {
+                                            id: "search_location_prompt",
+                                            title: "🔍 Search"
+                                        }
+                                    },
+                                    {
+                                        type: "reply",
+                                        reply: {
+                                            id: "popular_places",
+                                            title: "🏢 Popular Places"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    };
+                }
+                throw error;
+            }
+        }
+    }
     
     // Handle chat mode - user is asking questions about deals
     if (userState.step === 'chat_mode' && userState.chatContext) {
@@ -910,1133 +2200,161 @@ async function handleTextMessage(storeId, fromNumber, messageBody, userState, bo
         }
     }
     
-    // For non-chat mode, generate dynamic interactive welcome message using OpenAI
+    // For non-chat mode, treat any text as a potential location search for deal finding
     console.log(`[LobangLah] User sent text message outside of chat mode: "${messageBody}"`);
     
-    try {
-        // Generate personalized welcome message using OpenAI
-        const welcomeMessage = createConsistentWelcomeMessage(messageBody);
-        return welcomeMessage;
-    } catch (error) {
-        console.error(`[LobangLah] Error generating welcome message:`, error);
-        // Fallback to interactive message without OpenAI
-        return createInteractiveWelcomeMessage(messageBody);
-    }
-}
-
-/**
- * Handle interactive messages (button/list selections)
- */
-async function handleInteractiveMessage(storeId, fromNumber, interactiveData, userState, botConfig, session) {
-    const actionId = interactiveData.button_reply?.id || interactiveData.list_reply?.id;
-    console.log(`[LobangLah] Processing interactive action: ${actionId}`);
+    // Check if this looks like a location search or general query
+    const locationKeywords = [
+        'orchard', 'marina', 'chinatown', 'bugis', 'tampines', 'jurong', 'woodlands', 
+        'mall', 'shopping', 'restaurant', 'food', 'area', 'place', 'location', 'street',
+        'road', 'avenue', 'junction', 'plaza', 'center', 'centre', 'terminal', 'station',
+        'mrt', 'lrt', 'bus', 'park', 'garden', 'beach', 'harbour', 'harbor', 'bay',
+        'river', 'bridge', 'tower', 'building', 'hotel', 'resort', 'club', 'bar',
+        'cafe', 'coffee', 'tea', 'bakery', 'market', 'hawker', 'food court', 'deals',
+        'discount', 'offer', 'promotion', 'sale', 'cheap', 'budget', 'save', 'lobang'
+    ];
     
-    // Add user interaction to conversation history
-    session.conversation.push({ role: 'user', content: `Selected: ${actionId}` });
+    const isLocationQuery = locationKeywords.some(keyword => messageBody.toLowerCase().includes(keyword)) || 
+                           (messageBody.length > 2 && messageBody.length < 100 && 
+                            !messageBody.toLowerCase().includes('hello') && 
+                            !messageBody.toLowerCase().includes('hi') && 
+                            !messageBody.toLowerCase().includes('help'));
     
-    // Handle new welcome message buttons
-    if (actionId === 'share_location_prompt') {
-        console.log(`[LobangLah] User clicked share location from welcome message`);
-        return {
-            type: "text",
-            text: {
-                body: "📍 *Share Your Location*\n\nTo find amazing deals near you:\n\n🎯 **Option 1: Current Location**\n1️⃣ Tap the 📎 attachment icon\n2️⃣ Select 'Location'\n3️⃣ Choose 'Send your current location'\n\n🔍 **Option 2: Search for a Place**\n1️⃣ Tap the 📎 attachment icon\n2️⃣ Select 'Location'\n3️⃣ Tap the search bar at the top\n4️⃣ Type any location (e.g., 'Orchard Road', 'Marina Bay')\n5️⃣ Select from results and send\n\n✨ This helps me find the most accurate deals in your chosen area!"
-            }
-        };
-    }
-    
-    if (actionId === 'how_it_works') {
-        console.log(`[LobangLah] User clicked how it works from welcome message`);
-        return {
-            type: 'interactive',
-            interactive: {
-                type: 'button',
-                header: {
-                    type: 'text',
-                    text: '❓ How LobangLah Works'
-                },
-                body: {
-                    text: "🤖 **AI-Powered Deal Discovery**\n\n1️⃣ **Share Location**: Send your GPS location or search for any place\n2️⃣ **Get Weather**: I'll show current weather + hourly forecast\n3️⃣ **Choose Category**: Food, Fashion, or Groceries\n4️⃣ **AI Search**: I search thousands of deals using advanced AI\n5️⃣ **Get Results**: Receive 5 best deals with images, directions & details\n6️⃣ **Chat AI**: Ask questions about deals for personalized recommendations\n\n🎯 **Smart Features:**\n• Weather-aware suggestions (indoor/outdoor)\n• Real-time deal verification\n• Social media deal discovery\n• Interactive deal exploration\n\n🚀 Ready to start saving?"
-                },
-                footer: {
-                    text: '🎯 LobangLah - Your Smart Deal Hunter'
-                },
-                action: {
-                    buttons: [
-                        {
-                            type: 'reply',
-                            reply: {
-                                id: 'share_location_prompt',
-                                title: '📍 Share Location'
-                            }
-                        },
-                        {
-                            type: 'reply',
-                            reply: {
-                                id: 'about_lobangLah',
-                                title: '🎯 About Us'
-                            }
-                        }
-                    ]
-                }
-            }
-        };
-    }
-    
-    if (actionId === 'about_lobangLah') {
-        console.log(`[LobangLah] User clicked about us from welcome message`);
-        return {
-            type: 'interactive',
-            interactive: {
-                type: 'button',
-                header: {
-                    type: 'text',
-                    text: '🎯 About LobangLah'
-                },
-                body: {
-                    text: "🇸🇬 **Singapore's Smartest Deal Discovery Platform**\n\n🤖 **What We Do:**\n• AI-powered deal aggregation across Singapore\n• Real-time weather integration for smart recommendations\n• Social media deal discovery (Instagram, Facebook, TikTok, Reddit)\n• Location-based deal matching\n\n🎯 **Our Mission:**\nHelp Singaporeans save money by finding the best deals near them using cutting-edge AI technology and real-time data.\n\n🚀 **Why Choose LobangLah:**\n✅ Thousands of verified deals\n✅ Weather-aware recommendations\n✅ Instant deal discovery\n✅ Interactive chat support\n✅ Always up-to-date offers\n\n💡 **'Lobang'** means 'good deal' in Singaporean slang - and that's exactly what we deliver!"
-                },
-                footer: {
-                    text: '🚀 Powered by Advanced AI Technology'
-                },
-                action: {
-                    buttons: [
-                        {
-                            type: 'reply',
-                            reply: {
-                                id: 'share_location_prompt',
-                                title: '📍 Start Saving'
-                            }
-                        },
-                        {
-                            type: 'reply',
-                            reply: {
-                                id: 'how_it_works',
-                                title: '❓ How It Works'
-                            }
-                        }
-                    ]
-                }
-            }
-        };
-    }
-    
-    // Handle location request buttons
-    if (actionId === 'send_location') {
-        console.log(`[LobangLah] User requested to send location`);
-        return {
-            type: "text",
-            text: {
-                body: "📍 Please share your current location by tapping the 📎 attachment icon and selecting 'Location'.\n\nThis will help me find the best deals near you! 🎯"
-            }
-        };
-    }
-    
-    // Handle new location + weather category selection buttons
-    if (actionId === 'search_food_deals' || actionId === 'search_fashion_deals' || actionId === 'search_all_deals') {
-        // Determine category from button ID
-        let category;
-        if (actionId === 'search_food_deals') {
-            category = 'food';
-        } else if (actionId === 'search_fashion_deals') {
-            category = 'fashion';
-        } else {
-            category = 'all';
-        }
+    if (isLocationQuery) {
+        console.log(`[LobangLah] Treating text as location search for deal finding: "${messageBody}"`);
+        userState.step = 'location_search';
         
-        userState.category = category;
-        console.log(`[LobangLah] Category selected from location confirmation: ${category}`);
+        // Enhance the search query with AI
+        const enhancedQuery = await enhanceLocationSearchWithAI(messageBody, botConfig);
+        console.log(`[LobangLah] Enhanced query: "${enhancedQuery}"`);
         
-        // Location should already be set from the location confirmation flow
-        if (userState.location) {
-            console.log(`[LobangLah] Starting deal search for ${category} near ${userState.location.displayName}`);
-
-            // NEW: Search for nearby places using Google Places API with detailed info including photos
-            const googleMapsApiKey = botConfig?.googleMapsApiKey || process.env.GOOGLE_MAPS_API_KEY;
-            if (googleMapsApiKey && userState.location.latitude && userState.location.longitude && category !== 'all') {
-                // Fetch detailed place information including photos
-                const detailedNearbyPlaces = await searchNearbyPlaces(
-                    userState.location.latitude,
-                    userState.location.longitude,
-                    category,
-                    googleMapsApiKey,
-                    true // includeDetails = true to get photos and other data
-                );
-                
-                // Store both detailed places and simple names for backward compatibility
-                userState.nearbyPlacesDetailed = detailedNearbyPlaces;
-                userState.nearbyPlaces = detailedNearbyPlaces.map(place => place.name);
-                
-                console.log(`[LobangLah] Found ${detailedNearbyPlaces.length} nearby places with photos to enhance search.`);
-                console.log(`[LobangLah] Places with photos: ${detailedNearbyPlaces.filter(p => p.photos.length > 0).length}`);
-            }
-            
-            // New flow: 1. OpenAI Search, 2. DeepSeek Verification, 3. Photo Enhancement
-            console.log(`[LobangLah] 🚀 Starting new deal flow for ${userState.category} near ${userState.location.description}`);
-
-            // Step 1: Search for deals with OpenAI
-            const potentialDeals = await searchDealsWithOpenAI(userState.location, userState.category, botConfig, userState.nearbyPlacesDetailed || []);
-            
-            if (!potentialDeals || potentialDeals.length === 0) {
-                console.log('[LobangLah] OpenAI found no deals.');
-                const noDealsMessage = {
-                    type: "text",
-                    text: {
-                        body: `😢 Sorry, I couldn't find any ${userState.category} deals near ${userState.location.description} right now. Please try another category or location!`
-                    }
-                };
-                await sendWhatsAppMessage(storeId, fromNumber, noDealsMessage, botConfig);
-                return;
-            }
-
-            console.log(`[LobangLah] OpenAI found ${potentialDeals.length} potential deals. Skipping DeepSeek verification as requested.`);
-
-            // Step 2: Skip DeepSeek verification and use OpenAI deals directly
-            console.log(`[LobangLah] Using ${potentialDeals.length} deals directly from OpenAI. Now enhancing with photos.`);
-
-            // Step 3: Enhance OpenAI deals with photos (no verification step)
-            const finalDeals = enhanceDealsWithPhotos(potentialDeals, userState.nearbyPlacesDetailed || [], botConfig.googleMapsApiKey);
-
-            if (finalDeals && finalDeals.length > 0) {
-                // Add deal IDs to session to prevent duplicates
-                addSharedDealIds(session, finalDeals);
-
-                // Store deals in user state for chat context
-                userState.lastDeals = finalDeals;
-                userState.step = 'deals_shown';
-
-                // Send enhanced messages with photos
-                const dealMessages = await createEnhancedDealMessages(finalDeals, userState.category, botConfig);
-                for (const dealMessage of dealMessages) {
-                    await sendWhatsAppMessage(storeId, fromNumber, dealMessage, botConfig);
-                }
-            } else {
-                // No deals found after verification and enhancement
-                const noDealsMessage = {
-                    type: "text",
-                    text: {
-                        body: `😢 Sorry, I couldn't find any verifiable ${userState.category} deals near ${userState.location.description} right now. Please try another category or location!`
-                    }
-                };
-                await sendWhatsAppMessage(storeId, fromNumber, noDealsMessage, botConfig);
-            }
-        } else {
-            // This shouldn't happen, but handle gracefully
-            console.error(`[LobangLah] Category selected but no location data available`);
-            return {
-                type: "text",
-                text: {
-                    body: "❌ Location data not found. Please share your location again to continue."
-                }
-            };
-        }
-    }
-    
-    // Handle legacy category selection buttons (including those with location context)
-    if (actionId === 'food_deals' || actionId === 'clothes_deals' || actionId === 'groceries_deals' ||
-        actionId.startsWith('food_deals_') || actionId.startsWith('clothes_deals_') || actionId.startsWith('groceries_deals_')) {
-        
-        // Determine category from button ID
-        let category;
-        if (actionId === 'food_deals' || actionId.startsWith('food_deals_')) {
-            category = 'food';
-        } else if (actionId === 'groceries_deals' || actionId.startsWith('groceries_deals_')) {
-            category = 'groceries';
-        } else {
-            category = 'clothes';
-        }
-        
-        userState.category = category;
-        console.log(`[LobangLah] Category selected: ${category}`);
-        
-        // Check if we have location already set (from the new flow)
-        if (userState.location) {
-            console.log(`[LobangLah] Location already set, searching for deals...`);
-            
-            // Send interactive searching message using OpenAI
-            const searchingMessage = await createInteractiveSearchingMessage(userState.location, category, botConfig);
-            await sendLobangLahMessage(storeId, fromNumber, searchingMessage, botConfig, session);
-            
-            // Then search for deals and send results
-            return await searchAndSendDeals(storeId, fromNumber, userState, botConfig, session);
-        }
-        
-        // Fallback: if somehow category was selected without location, ask for location
-        console.log(`[LobangLah] Category selected but no location set, requesting location`);
-        userState.step = 'awaiting_location';
-        return {
-            type: "interactive",
-            interactive: {
-                type: "button",
-                body: {
-                    text: `Great! You've selected ${category === 'food' ? '🍕 Food' : category === 'groceries' ? '🛒 Groceries' : '👕 Fashion'} deals.\n\nNow I need to know your location to find the best deals near you! 📍`
-                },
-                action: {
-                    buttons: [
-                        {
-                            type: "reply",
-                            reply: {
-                                id: "send_location",
-                                title: "📍 Share Location"
-                            }
-                        }
-                    ]
-                }
-            }
-        };
-        
-    } else if (actionId && actionId.startsWith('deal_')) {
-        // Deal selected
-        const dealIndex = parseInt(actionId.replace('deal_', '')) - 1;
-        
-        if (userState.lastDeals && userState.lastDeals[dealIndex]) {
-            const selectedDeal = userState.lastDeals[dealIndex];
-            console.log(`[LobangLah] Deal selected:`, selectedDeal.title);
-            
-            // Store selected deal for future actions
-            userState.selectedDeal = selectedDeal;
-            userState.step = 'deal_selected';
-            
-            return createLocationMessage(selectedDeal);
-        }
-    } else if (actionId.startsWith('get_directions_')) {
-        // Handle indexed direction buttons (get_directions_0, get_directions_1, etc.)
-        const dealIndex = parseInt(actionId.replace('get_directions_', ''));
-        console.log(`[LobangLah] *** DIRECTIONS BUTTON CLICKED ***`);
-        console.log(`[LobangLah] Action ID: ${actionId}`);
-        console.log(`[LobangLah] Deal Index: ${dealIndex}`);
-        console.log(`[LobangLah] Has lastDeals: ${!!userState.lastDeals}`);
-        console.log(`[LobangLah] LastDeals length: ${userState.lastDeals?.length || 0}`);
-        
-        if (userState.lastDeals && userState.lastDeals[dealIndex]) {
-            const deal = userState.lastDeals[dealIndex];
-            const address = deal.address || deal.location || 'Address not available';
-            const businessName = deal.businessName || deal.restaurant || deal.store || deal.title;
-            
-            console.log(`[LobangLah] Found deal for directions: ${businessName}`);
-            console.log(`[LobangLah] Deal address: ${address}`);
-            console.log(`[LobangLah] Deal coordinates: ${deal.latitude}, ${deal.longitude}`);
-            console.log(`[LobangLah] Sending location for deal ${dealIndex}: ${businessName}`);
-            
-            // Send location message with coordinates if available
-            if (deal.latitude && deal.longitude) {
-                return {
-                    type: "location",
-                    location: {
-                        latitude: parseFloat(deal.latitude),
-                        longitude: parseFloat(deal.longitude),
-                        name: businessName,
-                        address: address
-                    }
-                };
-            } else {
-                // Fallback: Send text message with address and Google Maps link
-                console.log(`[LobangLah] No coordinates available, sending Google Maps link`);
-                const encodedAddress = encodeURIComponent(address);
-                const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodedAddress}&utm_source=LobangLah&utm_medium=whatsapp&utm_campaign=deals`;
-                console.log(`[LobangLah] Generated Maps URL: ${mapsUrl}`);
-                
-                return {
-                    type: "text",
-                    text: {
-                        body: `📍 *${businessName}*\n\n🏢 *Address:*\n${address}\n\n🗺️ *Get Directions:*\n${mapsUrl}\n\n💡 Tap the link above to open in Google Maps and get directions!\n\n🎯 *LobangLah*`
-                    }
-                };
-            }
-        } else {
-            console.log(`[LobangLah] *** DIRECTIONS FAILED - NO DEAL FOUND ***`);
-            console.log(`[LobangLah] Deal Index: ${dealIndex}`);
-            console.log(`[LobangLah] LastDeals: ${JSON.stringify(userState.lastDeals, null, 2)}`);
-            console.log(`[LobangLah] User State: ${JSON.stringify(userState, null, 2)}`);
-            console.log(`[LobangLah] Session: ${JSON.stringify(session, null, 2)}`);
-            return {
-                type: "text",
-                text: {
-                    body: `❌ *Deal Not Found*\n\nSorry, I couldn't find the deal you're looking for directions to. Please try searching for deals again.\n\n🎯 *LobangLah*`
-                }
-            };
-        }
-    } else if (actionId.startsWith('share_deal_')) {
-        // Handle indexed share buttons (share_deal_0, share_deal_1, etc.)
-        const dealIndex = parseInt(actionId.replace('share_deal_', ''));
-        
-        if (userState.lastDeals && userState.lastDeals[dealIndex]) {
-            const deal = userState.lastDeals[dealIndex];
-            const businessName = deal.businessName || deal.restaurant || deal.store || deal.title;
-            const address = deal.address || deal.location;
-            const offer = deal.offer || deal.discount || 'Special Deal';
-            const validity = deal.validity || 'Limited time';
-            
-            const shareText = `🔥 *Amazing Deal Alert!*\n\n🏢 *${businessName}*\n💰 *${offer}*\n📍 ${address}\n⏰ ${validity}\n\n🚀 Found via LobangLah - Singapore's Best Deals Bot!`;
-            
-            return {
-                type: "text",
-                text: {
-                    body: `📤 *Deal Shared!*\n\nHere's the deal info you can copy and share:\n\n${shareText}\n\n💡 Tip: Long press this message to copy and share with friends!`
-                }
-            };
-        }
-    } else if (actionId.startsWith('call_business_')) {
-        // Handle indexed call buttons (call_business_0, call_business_1, etc.)
-        const dealIndex = parseInt(actionId.replace('call_business_', ''));
-        
-        if (userState.lastDeals && userState.lastDeals[dealIndex]) {
-            const deal = userState.lastDeals[dealIndex];
-            const businessName = deal.businessName || deal.restaurant || deal.store || deal.title;
-            const contact = deal.contact || deal.phone;
-            
-            if (contact) {
-                
-                return {
-                    type: "text",
-                    text: {
-                        body: `📞 *Call ${businessName}*\n\n📱 *Phone:* ${contact}\n\n💡 Tap and hold the phone number above to call directly!\n\n🎯 *LobangLah*`
-                    }
-                };
-            } else {
-                return {
-                    type: "text",
-                    text: {
-                        body: `📞 *Contact Info Not Available*\n\nSorry, I don't have contact information for ${businessName}.\n\n💡 Try searching for them online or visiting their location directly.\n\n🎯 *LobangLah*`
-                    }
-                };
-            }
-        }
-    } else if (actionId.startsWith('set_reminder_')) {
-        // Handle indexed set reminder buttons
-        const dealIndex = parseInt(actionId.replace('set_reminder_', ''));
-        console.log(`[LobangLah] *** SET REMINDER BUTTON CLICKED ***`);
-        console.log(`[LobangLah] Action ID: ${actionId}`);
-        console.log(`[LobangLah] Deal Index: ${dealIndex}`);
-        console.log(`[LobangLah] Has lastDeals: ${!!userState.lastDeals}`);
-        console.log(`[LobangLah] LastDeals length: ${userState.lastDeals?.length || 0}`);
-        console.log(`[LobangLah] User State: ${JSON.stringify(userState, null, 2)}`);
-        console.log(`[LobangLah] Session: ${JSON.stringify(session, null, 2)}`);
-        
-        if (userState.lastDeals && userState.lastDeals[dealIndex]) {
-            const deal = userState.lastDeals[dealIndex];
-            const businessName = deal.businessName || deal.restaurant || deal.store || deal.title || 'this deal';
-            console.log(`[LobangLah] Found deal for reminder: ${businessName}`);
-            userState.step = 'waiting_reminder_time';
-            userState.reminderDeal = deal;
-            userState.reminderDealIndex = dealIndex;
-            
-            return {
-                type: "interactive",
-                interactive: {
-                    type: "button",
-                    header: {
-                        type: "text",
-                        text: "⏰ Set Reminder"
-                    },
-                    body: {
-                        text: `🔔 *Set Reminder for ${businessName}*\n\nWhen would you like to be reminded about this deal?\n\n⏰ Choose a time within the next 24 hours:\n\n• In 1 hour\n• In 2 hours\n• In 4 hours\n• Custom time (reply with text like "in 3 hours" or "at 7 PM")`
-                    },
-                    footer: {
-                        text: "🎯 LobangLah Reminder System"
-                    },
-                    action: {
-                        buttons: [
-                            {
-                                type: "reply",
-                                reply: {
-                                    id: "reminder_1hour",
-                                    title: "⏰ In 1 Hour"
-                                }
-                            },
-                            {
-                                type: "reply",
-                                reply: {
-                                    id: "reminder_2hours",
-                                    title: "⏰ In 2 Hours"
-                                }
-                            },
-                            {
-                                type: "reply",
-                                reply: {
-                                    id: "reminder_4hours",
-                                    title: "⏰ In 4 Hours"
-                                }
-                            }
-                        ]
-                    }
-                }
-            };
-        }
-    } else if (actionId.startsWith('reminder_')) {
-        // Handle reminder time selection
-        console.log(`[LobangLah] *** REMINDER TIME SELECTED ***`);
-        console.log(`[LobangLah] Action ID: ${actionId}`);
-        console.log(`[LobangLah] Has reminderDeal: ${!!userState.reminderDeal}`);
-        
-        if (userState.reminderDeal) {
-            const businessName = userState.reminderDeal.businessName || userState.reminderDeal.restaurant || userState.reminderDeal.store || userState.reminderDeal.title;
-            console.log(`[LobangLah] Setting reminder for: ${businessName}`);
-            let reminderTime;
-            let timeText;
-            
-            if (actionId === 'reminder_1hour') {
-                reminderTime = new Date(Date.now() + 60 * 60 * 1000); // 1 hour from now
-                timeText = '1 hour';
-            } else if (actionId === 'reminder_2hours') {
-                reminderTime = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2 hours from now
-                timeText = '2 hours';
-            } else if (actionId === 'reminder_4hours') {
-                reminderTime = new Date(Date.now() + 4 * 60 * 60 * 1000); // 4 hours from now
-                timeText = '4 hours';
-            }
-            
-            // Save reminder to DynamoDB
-            console.log(`[LobangLah] Attempting to save reminder to DynamoDB...`);
-            console.log(`[LobangLah] Reminder time: ${reminderTime.toISOString()}`);
-            try {
-                const { saveReminderToDynamoDB } = await import('../utils/reminderUtils.js');
-                await saveReminderToDynamoDB({
-                    userId: fromNumber,
-                    dealData: userState.reminderDeal,
-                    reminderTime: reminderTime,
-                    title: `${businessName} Deal Reminder`,
-                    storeId: storeId
-                });
-                
-                console.log(`[LobangLah] ✅ Reminder saved successfully for ${businessName} in ${timeText}`);
-                
-                // Reset reminder state
-                userState.step = 'deals_shown';
-                delete userState.reminderDeal;
-                delete userState.reminderDealIndex;
-                
-                return {
-                    type: "text",
-                    text: {
-                        body: `⏰ *Reminder Set Successfully!*\n\n🔔 You'll be reminded about **${businessName}** in ${timeText}.\n\n📅 Reminder Time: ${reminderTime.toLocaleString('en-SG', { timeZone: 'Asia/Singapore' })} SGT\n\n✅ We'll send you a WhatsApp message when it's time!\n\n🎯 *LobangLah*`
-                    }
-                };
-            } catch (error) {
-                console.error('[LobangLah] ❌ Error saving reminder:', error);
-                console.error('[LobangLah] Error details:', error.message);
-                console.error('[LobangLah] Error stack:', error.stack);
-                return {
-                    type: "text",
-                    text: {
-                        body: `❌ *Error Setting Reminder*\n\nSorry, there was an issue setting your reminder. Please try again later.\n\nError: ${error.message}\n\n🎯 *LobangLah*`
-                    }
-                };
-            }
-        } else {
-            console.log(`[LobangLah] *** REMINDER TIME SELECTION FAILED - NO REMINDER DEAL ***`);
-            console.log(`[LobangLah] User state step: ${userState.step}`);
-            return {
-                type: "text",
-                text: {
-                    body: `❌ *Reminder Setup Error*\n\nSorry, I couldn't find the deal you want to set a reminder for. Please try clicking the reminder button again.\n\n🎯 *LobangLah*`
-                }
-            };
-        }
-    } else if (actionId === 'chat_ai_deals') {
-        // Chat AI about deals action - engage ChatGPT to discuss the deals
-        console.log(`[LobangLah] *** CHAT AI BUTTON CLICKED ***`);
-        console.log(`[LobangLah] Action ID: ${actionId}`);
-        
-        // Debug: Log current userState to identify missing data
-        console.log(`[LobangLah] Chat AI activation - userState check:`, {
-            hasLastDeals: !!userState.lastDeals,
-            dealsCount: userState.lastDeals?.length || 0,
-            hasLocation: !!userState.location,
-            hasCategory: !!userState.category,
-            step: userState.step,
-            userStateKeys: Object.keys(userState || {})
-        });
-        
-        console.log(`[LobangLah] Session check:`, {
-            hasSession: !!session,
-            hasUserState: !!session?.userState,
-            sessionKeys: Object.keys(session || {})
-        });
-        
-        // Try to restore from session if userState is missing data
-        if ((!userState.lastDeals || !userState.location) && session.userState) {
-            console.log(`[LobangLah] Restoring missing data from session:`, {
-                sessionHasDeals: !!session.userState.lastDeals,
-                sessionHasLocation: !!session.userState.location,
-                sessionHasCategory: !!session.userState.category
-            });
-            
-            // Restore missing data from session
-            userState.lastDeals = userState.lastDeals || session.userState.lastDeals;
-            userState.location = userState.location || session.userState.location;
-            userState.category = userState.category || session.userState.category;
-        }
-        
-        // Chat AI functionality has been removed as requested by user
-        return {
-            type: "text",
-            text: {
-                body: "🚫 Chat AI feature has been disabled. Please use the deal buttons for directions, reminders, and sharing."
-            }
-        };
-        
-    } else if (actionId === 'more_deals') {
-        // More deals action - search for additional deals from DynamoDB
-        if (userState.category && userState.location) {
-            const categoryName = userState.category === 'food' ? 'food' : 
-                               userState.category === 'groceries' ? 'groceries' : 'fashion';
-            const locationName = userState.location.displayName || userState.location.description || userState.location.name || 'your area';
-            
-            console.log(`[LobangLah] Searching for more ${userState.category} deals near ${locationName}...`);
-            console.log(`[LobangLah] Currently excluding ${(userState.lastDeals || []).length} already shown deals`);
-            
-            // Send "searching" message to let user know we're working
-            await sendLobangLahMessage(storeId, fromNumber, {
-                type: "text",
-                text: {
-                    body: `🔍 *Searching for More ${categoryName.charAt(0).toUpperCase() + categoryName.slice(1)} Deals*\n\nLooking for additional deals near ${locationName}...\n\nPlease wait a moment! ⏳`
-                }
-            }, botConfig, session);
-            
-            // Get current deals to exclude from new search
-            const excludeDeals = userState.lastDeals || [];
-            
-            // Search for more deals from DynamoDB
-            const { searchMoreDealsFromDynamoDB } = await import('../utils/dealsUtils.js');
-            const moreDeals = await searchMoreDealsFromDynamoDB(
-                userState.location, 
-                userState.category, 
-                excludeDeals, 
-                5 // Get up to 5 more deals
-            );
-            
-            if (moreDeals && moreDeals.length > 0) {
-                console.log(`[LobangLah] Found ${moreDeals.length} additional unique deals`);
-                
-                // Send confirmation message
-                await sendLobangLahMessage(storeId, fromNumber, {
-                    type: "text",
-                    text: {
-                        body: `✅ *Found ${moreDeals.length} More ${categoryName.charAt(0).toUpperCase() + categoryName.slice(1)} Deals!*\n\nHere are additional deals I haven't shown you yet:`
-                    }
-                }, botConfig, session);
-                
-                // Create catalog-based deal messages for the additional deals
-                const moreDealMessages = await createCatalogDealsMessage(moreDeals, userState.category, botConfig);
-                
-                // Update user state with combined deals (ensure no duplicates)
-                const allDeals = [...(userState.lastDeals || []), ...moreDeals];
-                userState.lastDeals = allDeals;
-                
-                console.log(`[LobangLah] Total deals shown to user: ${allDeals.length}`);
-                
-                // Send the additional deal messages
-                for (const dealMessage of moreDealMessages) {
-                    await sendLobangLahMessage(storeId, fromNumber, dealMessage, botConfig, session);
-                }
-                
-                // Update chat context for AI conversations
-                if (userState.chatContext) {
-                    userState.chatContext.deals = allDeals;
-                }
-                
-                return null; // Already sent messages above
-            } else {
-                const categoryName = userState.category === 'food' ? 'food' : 
-                                   userState.category === 'groceries' ? 'groceries' : 'fashion';
-                const locationName = userState.location.description || userState.location.name || 'your area';
-                
-                return {
-                    type: "text",
-                    text: {
-                        body: `🔍 *No More Deals Found*\n\n😔 I've already shown you all the available ${categoryName} deals near ${locationName}.\n\n💡 *Try:*\n• Search in a different area (share new location)\n• Try a different category\n• Chat with me about the current deals\n\n🎆 *LobangLah* - Always finding the best deals!`
-                    }
-                };
-            }
-        } else {
-            return {
-                type: "text",
-                text: {
-                    body: "🔍 To find more deals, please first search for deals by sharing your location! 📍"
-                }
-            };
-        }
-    } else if (actionId === 'share_deals') {
-        // Share all deals action
-        if (userState.lastDeals && userState.lastDeals.length > 0) {
-            const categoryName = userState.category === 'food' ? 'Food' : 'Fashion';
-            const locationName = userState.location.description || userState.location.name;
-            
-            let shareText = `🔥 *${userState.lastDeals.length} Amazing ${categoryName} Deals Near ${locationName}!*\n\n`;
-            
-            userState.lastDeals.slice(0, 5).forEach((deal, index) => {
-                const businessName = deal.businessName || deal.restaurant || deal.store || deal.title;
-                const offer = deal.offer || deal.discount || 'Special Deal';
-                const address = deal.address || deal.location;
-                
-                shareText += `${index + 1}. *${businessName}*\n`;
-                shareText += `   💰 ${offer}\n`;
-                shareText += `   📍 ${address}\n\n`;
-            });
-            
-            shareText += `🚀 Shared via LobangLah - Singapore's Best Deals Bot!`;
-            
-            return {
-                type: "text",
-                text: {
-                    body: `📤 *Deals Shared!*\n\nHere's the complete deal list you can copy and share:\n\n${shareText}\n\n💡 Tip: Long press this message to copy and share with friends!`
-                }
-            };
-        } else {
-            return {
-                type: "text",
-                text: {
-                    body: "📤 No deals to share yet! Please search for deals first by sharing your location. 📍"
-                }
-            };
-        }
-    } else if (actionId === 'more_deals') {
-        // Legacy support for old more_deals button
-        if (userState.category && userState.location) {
-            console.log(`[LobangLah] Fetching more ${userState.category} deals for ${userState.location.description}`);
-            return await searchAndSendMoreDeals(fromNumber, userState, botConfig, session);
-        } else {
-            userState.step = 'welcome';
-            return createWelcomeMessage();
-        }
-    }
-    
-    // Default: Show welcome message
-    return createWelcomeMessage();
-}
-
-/**
- * Handle location messages with Google Maps + Weather integration
- */
-async function handleLocationMessage(storeId, fromNumber, locationData, userState, botConfig, session) {
-    console.log(`[LobangLah] Processing location message with Google + Weather:`, locationData);
-    
-    // Add user location to conversation history
-    session.conversation.push({ role: 'user', content: `Shared location: ${locationData.latitude}, ${locationData.longitude}` });
-    
-    try {
-        // Get Google Maps API key from botConfig
-        const googleMapsApiKey = botConfig?.googleMapsApiKey || process.env.GOOGLE_MAPS_API_KEY || 'AIzaSyAEickHlx5T4alk1Cu5ks-EzF8xzyxoTDQ';
-        
-        console.log(`[LobangLah] API Key Sources:`, {
-            fromBotConfigMapsKey: botConfig?.googleMapsApiKey ? 'EXISTS' : 'MISSING',
-            fromEnvVar: process.env.GOOGLE_MAPS_API_KEY ? 'EXISTS' : 'MISSING',
-            finalKeyLength: googleMapsApiKey ? googleMapsApiKey.length : 0
-        });
-        
+        // Search for locations
+        const googleMapsApiKey = botConfig?.googleMapsApiKey || process.env.GOOGLE_MAPS_API_KEY;
         if (!googleMapsApiKey) {
-            throw new Error('Google Maps API key not configured');
-        }
-        
-        console.log(`[LobangLah] Resolving location and weather for: ${locationData.latitude}, ${locationData.longitude}`);
-        
-        // Use Google Maps + Weather API to get complete location data
-        const locationResult = await resolveLocationAndWeather(
-            locationData.latitude,
-            locationData.longitude,
-            botConfig.googleMapsApiKey
-        );
-        
-        if (!locationResult.isValid) {
-            throw new Error(locationResult.error || 'Failed to resolve location');
-        }
-        
-        // CRITICAL: Clear previous location context to prevent session caching issues
-        // Reset deals, chat context, and shared deal IDs when new location is shared
-        console.log(`[LobangLah] NEW LOCATION SHARED - Clearing previous session context`);
-        
-        // Clear previous deals and chat context
-        if (userState.deals) {
-            console.log(`[LobangLah] Clearing ${userState.deals.length} previous deals from old location`);
-            delete userState.deals;
-        }
-        if (userState.chatContext) {
-            console.log(`[LobangLah] Clearing previous chat context from old location`);
-            delete userState.chatContext;
-        }
-        
-        // Reset shared deal IDs to prevent showing deals from previous location
-        if (session.sharedDealIds && session.sharedDealIds.length > 0) {
-            console.log(`[LobangLah] Clearing ${session.sharedDealIds.length} shared deal IDs from previous location`);
-            session.sharedDealIds = [];
-        }
-        
-        // Reset category selection to force user to choose again for new location
-        if (userState.category) {
-            console.log(`[LobangLah] Resetting category selection for new location`);
-            delete userState.category;
-        }
-        
-        // Store complete location data in user state (locationResult is now flattened)
-        userState.location = {
-            type: 'gps',
-            latitude: locationResult.latitude || locationResult.coordinates?.lat,
-            longitude: locationResult.longitude || locationResult.coordinates?.lng,
-            displayName: locationResult.displayName,
-            formattedAddress: locationResult.formattedAddress,
-            area: locationResult.area,
-            postalCode: locationResult.postalCode,
-            fullLocationContext: locationResult.fullLocationContext,
-            weather: locationResult.weather,
-            source: 'google_maps_weather'
-        };
-        userState.step = 'location_confirmed';
-        
-        console.log(`[LobangLah] Location resolved: ${locationResult.displayName} (${locationResult.area})`);
-        
-        // Create OpenAI-generated interactive message with location and weather details
-        const interactiveMessage = await generateLocationWeatherMessage(locationResult, botConfig);
-        
-        await sendLobangLahMessage(storeId, fromNumber, interactiveMessage, botConfig, session);
-        
-        // Add location context to conversation for OpenAI analysis
-        session.conversation.push({ 
-            role: 'assistant', 
-            content: `Location confirmed: ${locationResult.displayName}, ${locationResult.area}. Weather: ${locationResult.weather?.displayText || 'unavailable'}. Ready to search for deals.` 
-        });
-        
-        // Save updated session
-        session.userState = userState;
-        session.lastInteraction = 'location_confirmed';
-        session.timestamp = Date.now();
-        await updateSession(storeId, fromNumber, session);
-        
-        // Location processing complete - no return value needed
-        
-    } catch (error) {
-        console.error(`[LobangLah] Error resolving location:`, error);
-        
-        // Fallback: send error message
-        await sendLobangLahMessage(storeId, fromNumber, {
-            type: "text",
-            text: {
-                body: `❌ *Unable to resolve location*\n\n${error.message}\n\nPlease try sharing your location again or make sure you're in Singapore.`
-            }
-        }, botConfig, session);
-        
-        return false;
-    }
-}
-
-/**
- * Generate OpenAI-powered location and weather message that's relevant to the user
- */
-async function generateLocationWeatherMessage(locationResult, botConfig) {
-    try {
-        const openAIApiKey = botConfig?.openAiApiKey || botConfig?.openAIApiKey || botConfig?.openai_api_key || process.env.OPENAI_API_KEY;
-        
-        if (!openAIApiKey) {
-            console.log('[LobangLah] No OpenAI API key found, using fallback location message');
-            return createFallbackLocationWeatherMessage(locationResult);
-        }
-        
-        const openai = new OpenAI({ apiKey: openAIApiKey });
-        
-        // Build context for OpenAI
-        const locationContext = `${locationResult.displayName}, ${locationResult.area || 'Singapore'}`;
-        const weatherContext = locationResult.weather?.isValid 
-            ? `Current weather: ${locationResult.weather.displayText}` 
-            : 'Weather information unavailable';
-        
-        const hourlyContext = locationResult.hourlyForecast?.isValid && locationResult.hourlyForecast.hourlyForecast?.length > 0
-            ? `Hourly forecast for rest of day (${locationResult.hourlyForecast.hoursRemaining}h remaining): ${locationResult.hourlyForecast.hourlyForecast.slice(0, 3).map(h => h.displayText).join(', ')}`
-            : 'No hourly forecast available';
-        
-        const prompt = `You are LobangLah, Singapore's smartest AI deal discovery assistant. A user just shared their location and you've confirmed it.
-
-Location: ${locationContext}
-${weatherContext}
-${hourlyContext}
-
-Generate a warm, engaging message that:
-1. Confirms their location in a friendly way
-2. Mentions the current weather and what it means for deal hunting
-3. If there's hourly forecast, mention how it affects their day/deals
-4. Suggests what type of deals might be perfect for this weather/location
-5. Encourages them to choose a category to start finding deals
-6. Keep it conversational, helpful, and under 120 words
-7. Use emojis appropriately
-8. End with encouraging them to pick a deal category
-
-Make it feel personal and relevant to their specific location and weather conditions.`;
-        
-        const response = await openai.chat.completions.create({
-            model: 'gpt-4o-mini',
-            messages: [{ role: 'user', content: prompt }],
-            max_tokens: 150,
-            temperature: 0.7
-        });
-        
-        const aiLocationText = response.choices[0].message.content.trim();
-        
-        console.log(`[LobangLah] Generated AI location/weather message: ${aiLocationText.substring(0, 80)}...`);
-        
-        return {
-            type: 'interactive',
-            interactive: {
-                type: 'button',
-                header: {
-                    type: 'text',
-                    text: '🎯 Location & Weather Confirmed'
-                },
-                body: {
-                    text: aiLocationText
-                },
-                footer: {
-                    text: 'Choose what type of deals you want to find'
-                },
-                action: {
-                    buttons: [
-                        {
-                            type: 'reply',
-                            reply: {
-                                id: 'search_food_deals',
-                                title: '🍽️ Food Deals'
-                            }
-                        },
-                        {
-                            type: 'reply',
-                            reply: {
-                                id: 'search_fashion_deals',
-                                title: '👕 Fashion Deals'
-                            }
-                        },
-                        {
-                            type: 'reply',
-                            reply: {
-                                id: 'search_groceries_deals',
-                                title: '🛒 Groceries'
-                            }
-                        }
-                    ]
-                }
-            }
-        };
-        
-    } catch (error) {
-        console.error('[LobangLah] Error generating AI location/weather message:', error);
-        return createFallbackLocationWeatherMessage(locationResult);
-    }
-}
-
-/**
- * Create fallback location and weather message when OpenAI is not available
- */
-function createFallbackLocationWeatherMessage(locationResult) {
-    // Build location details
-    let locationText = `📍 *Location Confirmed*\n${locationResult.displayName}`;
-    
-    if (locationResult.area && locationResult.area !== locationResult.displayName) {
-        locationText += `\n📍 Area: ${locationResult.area}`;
-    }
-    
-    // Add weather information if available
-    if (locationResult.weather && locationResult.weather.isValid) {
-        const weather = locationResult.weather;
-        locationText += `\n\n${weather.emoji} *Current Weather*\n${weather.displayText}`;
-        
-        // Add hourly forecast for the rest of the day if available
-        if (locationResult.hourlyForecast && locationResult.hourlyForecast.isValid) {
-            const forecast = locationResult.hourlyForecast;
-            if (forecast.hourlyForecast && forecast.hourlyForecast.length > 0) {
-                locationText += `\n\n⏰ *Rest of Today (${forecast.hoursRemaining}h remaining)*`;
-                
-                // Show next 3-4 hours
-                const hoursToShow = Math.min(forecast.hourlyForecast.length, 4);
-                const forecastItems = forecast.hourlyForecast.slice(0, hoursToShow);
-                
-                forecastItems.forEach(hour => {
-                    locationText += `\n${hour.displayText}`;
-                });
-                
-                if (forecast.hourlyForecast.length > hoursToShow) {
-                    locationText += `\n...and ${forecast.hourlyForecast.length - hoursToShow} more hours`;
-                }
-            }
-        }
-    } else if (locationResult.weatherError) {
-        locationText += `\n\n🌤️ *Weather*\nUnable to get weather info`;
-    }
-    
-    locationText += `\n\n🎯 Ready to find the best deals for you!`;
-    
-    return {
-        type: 'interactive',
-        interactive: {
-            type: 'button',
-            header: {
-                type: 'text',
-                text: '🎯 Location & Weather Confirmed'
-            },
-            body: {
-                text: locationText
-            },
-            footer: {
-                text: 'Choose what type of deals you want to find'
-            },
-            action: {
-                buttons: [
-                    {
-                        type: 'reply',
-                        reply: {
-                            id: 'search_food_deals',
-                            title: '🍽️ Food Deals'
-                        }
-                    },
-                    {
-                        type: 'reply',
-                        reply: {
-                            id: 'search_fashion_deals',
-                            title: '👕 Fashion Deals'
-                        }
-                    },
-                    {
-                        type: 'reply',
-                        reply: {
-                            id: 'search_groceries_deals',
-                            title: '🛒 Groceries'
-                        }
-                    }
-                ]
-            }
-        }
-    };
-}
-
-/**
- * Search for deals and send results
- */
-async function searchAndSendDeals(storeId, fromNumber, userState, botConfig, session) {
-    try {
-        console.log(`[LobangLah] Searching for ${userState.category} deals near ${userState.location.description}`);
-        
-        // Send location/weather-aware sticker during deal search to keep user engaged
-        console.log(`[LobangLah] Sending location/weather-aware sticker during deal search...`);
-        const weatherData = userState.location?.weather || null;
-        const locationData = userState.location || null;
-        
-        // Send personalized sticker asynchronously (don't wait for it)
-        generateAndSendSticker(storeId, fromNumber, 'deals', botConfig, weatherData, locationData)
-            .then(sent => {
-                if (sent) {
-                    console.log(`[LobangLah] Location/weather-aware sticker sent successfully during deal search`);
-                } else {
-                    console.log(`[LobangLah] Sticker sending failed (non-critical)`);
-                }
-            })
-            .catch(error => {
-                console.log(`[LobangLah] Sticker send failed (non-critical): ${error.message}`);
-            });
-        
-        // Add search activity to conversation history
-        const searchMessage = `Searching for ${userState.category} deals near ${userState.location.description}`;
-        session.conversation.push({ role: 'assistant', content: searchMessage });
-        
-        // ALWAYS fetch fresh deals - no caching logic
-        console.log(`[LobangLah] === FRESH DEAL SEARCH START ===`);
-        console.log(`[LobangLah] Category: ${userState.category}`);
-        console.log(`[LobangLah] Location Data:`, JSON.stringify({
-            description: userState.location.description,
-            displayName: userState.location.displayName,
-            area: userState.location.area,
-            postalCode: userState.location.postalCode,
-            coordinates: { lat: userState.location.latitude, lng: userState.location.longitude },
-            source: userState.location.source
-        }, null, 2));
-        console.log(`[LobangLah] Fetching FRESH deals (no cache) for ${userState.category} near ${userState.location.description}`);
-        
-        const deals = await searchDealsWithOpenAI(userState.location, userState.category, botConfig, userState.nearbyPlacesDetailed || []);
-        
-        if (deals && deals.length > 0) {
-            console.log(`[LobangLah] Successfully found ${deals.length} deals, sending individual messages...`);
-            
-            // Track these deals as shown in the session
-            const dealIds = deals.map(deal => deal.id || deal.title);
-            session.shownDeals.push(...dealIds);
-            
-            // Store deals for selection (no location caching)
-            userState.lastDeals = deals;
-            userState.step = 'deals_shown';
-            
-            // Save user profile
-            await saveUserProfile(fromNumber, {
-                lastCategory: userState.category,
-                lastLocation: userState.location,
-                searchCount: (await getUserProfile(fromNumber))?.searchCount + 1 || 1
-            });
-            
-            console.log(`[LobangLah] Found ${deals.length} deals for ${fromNumber}, total shown deals: ${session.shownDeals.length}`);
-            
-            // Create complete interactive deal messages with full details
-            console.log(`[LobangLah] Creating COMPLETE interactive deal messages for category: ${userState.category}`);
-            const dealMessages = await createIndividualDealMessages(deals, userState.category, botConfig);
-            console.log(`[LobangLah] Created ${dealMessages.length} complete deal messages`);
-            
-            // Send each complete deal message with conversation tracking
-            for (let i = 0; i < dealMessages.length; i++) {
-                const message = dealMessages[i];
-                
-                try {
-                    // Add bot message to conversation history for complete deal message
-                    const dealTitle = message.dealData?.businessName || message.dealData?.title || `Deal ${i + 1}`;
-                    const conversationEntry = `Showed complete deal: ${dealTitle} with full details and interactive buttons`;
-                    session.conversation.push({ role: 'assistant', content: conversationEntry });
-                    
-                    // Send the complete deal message
-                    await sendLobangLahMessage(storeId, fromNumber, message, botConfig, session);
-                    
-                    // Add small delay between messages to ensure proper delivery
-                    if (i < dealMessages.length - 1) {
-                        await new Promise(resolve => setTimeout(resolve, 1500));
-                    }
-                    
-                    console.log(`[LobangLah] Sent complete deal message ${i + 1}/${dealMessages.length}: ${dealTitle}`);
-                    
-                } catch (error) {
-                    console.error(`[LobangLah] Error sending deal message ${i + 1}:`, error);
-                    // Continue with next message even if one fails
-                }
-            }
-            
-            // Save user state to session for persistence
-            session.userState = userState;
-            session.lastInteraction = 'deals_shown';
-            session.timestamp = Date.now();
-            
-            console.log(`[LobangLah] Saving session after sending deals:`, {
-                hasLastDeals: !!session.userState.lastDeals,
-                dealsCount: session.userState.lastDeals?.length || 0,
-                hasLocation: !!session.userState.location,
-                hasCategory: !!session.userState.category,
-                step: session.userState.step,
-                conversationLength: session.conversation?.length || 0
-            });
-            
-            // Update session in DynamoDB
-            await updateSession(storeId, fromNumber, session);
-            console.log(`[LobangLah] Session saved successfully after sending ${catalogMessages.length} deals`);
-            
-            // Return null since we've already sent all messages
-            return null;
-            
-        } else {
-            console.log(`[LobangLah] No deals found for ${fromNumber}`);
+            console.log(`[LobangLah] No Google Maps API key found`);
             return {
                 type: "text",
-                text: { 
-                    body: `🔍 I searched Instagram, Facebook, TikTok & web for ${userState.category} deals near ${userState.location.description} but couldn't find any active offers right now.\n\n💡 Try:\n• Different location\n• Other category\n• Check back later\n\n🔍 Source: AI Web Search | LobangLah 🎯` 
+                text: {
+                    body: "❌ Sorry lah! Location service not available. Please try sharing your GPS location instead."
                 }
             };
         }
         
-    } catch (error) {
-        console.error(`[LobangLah] Error searching for deals:`, error);
-        console.error(`[LobangLah] Error stack:`, error.stack);
-        console.error(`[LobangLah] User state:`, JSON.stringify(userState, null, 2));
-        return {
-            type: "text",
-            text: { body: "Sorry, I had trouble finding deals right now. Please try again! 😅" }
-        };
+        try {
+            const suggestions = await searchLocationByName(enhancedQuery, googleMapsApiKey, botConfig);
+            console.log(`[LobangLah] Found ${suggestions.length} suggestions for "${enhancedQuery}"`);
+            
+            if (suggestions.length === 0) {
+                return {
+                    type: "interactive",
+                    interactive: {
+                        type: "button",
+                        header: {
+                            type: "text",
+                            text: "🔍 Location Not Found"
+                        },
+                        body: {
+                            text: `❌ Sorry lah! Couldn't find "${messageBody}" in Singapore.\n\n🌍 **This bot only works in Singapore.**\n\nPlease try a different approach.`
+                        },
+                        footer: {
+                            text: "Choose an option"
+                        },
+                        action: {
+                            buttons: [
+                                {
+                                    type: "reply",
+                                    reply: {
+                                        id: "share_location_prompt",
+                                        title: "📍 Share"
+                                    }
+                                },
+                                {
+                                    type: "reply",
+                                    reply: {
+                                        id: "search_location_prompt",
+                                        title: "🔍 Search"
+                                    }
+                                },
+                                {
+                                    type: "reply",
+                                    reply: {
+                                        id: "popular_places",
+                                        title: "🏢 Popular Places"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                };
+            }
+            
+            // Create location search results message
+            const { createLocationSearchMessage } = await import('../utils/locationSearchUtils.js');
+            const locationMessage = createLocationSearchMessage(enhancedQuery, suggestions);
+            
+            // Save session
+            session.userState = userState;
+            session.lastInteraction = 'location_search_results';
+            session.timestamp = Date.now();
+            await updateSession(storeId, fromNumber, session);
+            
+            return locationMessage;
+            
+        } catch (error) {
+            if (error.message === 'Location not in Singapore') {
+                return {
+                    type: "interactive",
+                    interactive: {
+                        type: "button",
+                        header: {
+                            type: "text",
+                            text: "🌍 Singapore Only"
+                        },
+                        body: {
+                            text: `📍 "${messageBody}" is not a Singapore location.\n\n🌍 **This bot only works in Singapore.**\n\nPlease try a Singapore location or share your GPS location.`
+                        },
+                        footer: {
+                            text: "Choose an option"
+                        },
+                        action: {
+                            buttons: [
+                                {
+                                    type: "reply",
+                                    reply: {
+                                        id: "share_location_prompt",
+                                        title: "📍 Share"
+                                    }
+                                },
+                                {
+                                    type: "reply",
+                                    reply: {
+                                        id: "search_location_prompt",
+                                        title: "🔍 Search"
+                                    }
+                                },
+                                {
+                                    type: "reply",
+                                    reply: {
+                                        id: "popular_places",
+                                        title: "🏢 Popular Places"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                };
+            }
+            throw error;
+        }
+    } else {
+        // If it's not a location query, show the welcome message
+        console.log(`[LobangLah] Text not recognized as location search, showing welcome message`);
+        try {
+            const welcomeMessage = createConsistentWelcomeMessage(messageBody);
+            return welcomeMessage;
+        } catch (error) {
+            console.error(`[LobangLah] Error generating welcome message:`, error);
+            return createInteractiveWelcomeMessage(messageBody);
+        }
     }
 }

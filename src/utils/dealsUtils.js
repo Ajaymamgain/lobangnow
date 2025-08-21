@@ -3,24 +3,14 @@ import { DynamoDBClient, ScanCommand, PutItemCommand } from '@aws-sdk/client-dyn
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { OpenAI } from 'openai';
 import { v4 as uuidv4 } from 'uuid';
+import { getSingaporeWelcomeMessage, getSingaporeErrorMessage, getSingaporeSuccessMessage, formatSingaporeDeal, rankSingaporeDeals, singaporeDealCategories } from './singaporeFeatures.js';
 // Removed verifyDealsWithDeepSeek and getVerificationStats imports as DeepSeek verification is now skipped
 
 /**
  * Create welcome message asking for location first.
  */
 export function createWelcomeMessage() {
-    return {
-        type: "interactive",
-        interactive: {
-            type: "button",
-            header: { type: "text", text: "🔥 Welcome to LobangLah!" },
-            body: { text: "Hi there! I'm your personal AI deal hunter from **LobangLah** - Singapore's smartest deal discovery platform! 🤖\n\nI can find the best deals near you for food, fashion, groceries, and more, all with today's weather forecast.\n\n📍 **Ready to start saving?** Share your location and I'll find amazing deals nearby!" },
-            footer: { text: "🚀 Powered by LobangLah AI" },
-            action: {
-                buttons: [{ type: "reply", reply: { id: "send_location", title: "📍 Share Location" } }]
-            }
-        }
-    };
+    return getSingaporeWelcomeMessage();
 }
 
 /**
@@ -36,9 +26,9 @@ export function createCategorySelectionMessage(locationName) {
             footer: { text: "🔍 AI-powered deal search" },
             action: {
                 buttons: [
-                    { type: "reply", reply: { id: `food_deals`, title: "🍕 Food" } },
-                    { type: "reply", reply: { id: `clothes_deals`, title: "👕 Fashion" } },
-                    { type: "reply", reply: { id: `groceries_deals`, title: "🛒 Groceries" } }
+                    { type: "reply", reply: { id: `search_food_deals`, title: "🍽️ Food" } },
+                    { type: "reply", reply: { id: `search_events_deals`, title: "🎉 Events" } },
+                    { type: "reply", reply: { id: `search_fashion_deals`, title: "👕 Fashion" } }
                 ]
             }
         }
@@ -157,9 +147,27 @@ export async function searchDealsWithOpenAI(location, category, botConfig, nearb
         const model = botConfig.openAiModel || 'gpt-4o-mini';
 
         const locationName = location.displayName || location.area || location.description || 'Singapore';
-        const searchSystemMessage = `You are a deal discovery expert for Singapore businesses. Find current promotions, discounts, and special offers for the given businesses. Search across their websites, social media (Instagram, Facebook, TikTok), review sites, and general web for recent deals. Focus on real, current offers like '1-for-1', 'X% off', 'set meals', 'happy hour', etc. Return only verifiable deals with specific details.`;
+        
+        // Singapore-specific system message with primary deal sources
+        const searchSystemMessage = `You are a Singapore deal discovery expert specializing in finding the best lobang (good deals) for Singaporeans. 
 
-        const searchPrompt = `Find current deals and promotions for these ${category} businesses near ${locationName}, Singapore:\n\n${nearbyPlaces.map(p => `- Name: ${p.displayName?.text || p.displayName}, Website: ${p.websiteUri || 'N/A'}, Place ID: ${p.id}`).join('\n')}\n\nReturn a JSON object with 'deals' array containing objects with 'place_id' and 'deal_info'. Only include real, current deals with specific details. If no deal found for a business, set deal_info to null.`;
+**PRIMARY DEAL SOURCES TO SEARCH:**
+1. **Soup Restaurant** - https://www.souprestaurant.com.sg/ (Official SG60 Promo)
+2. **Great Deals Singapore** - https://www.greatdeals.com.sg/ (SG60 60% Off deals)
+3. **Eatigo** - https://eatigo.com/sg/ (Up to 30% Off restaurant deals)
+4. **Chope Singapore** - https://shop.chope.co/ (20% Off Cash Vouchers)
+5. **Syioknya Singapore** - https://sg.syioknya.com/ (SG60 Meal promotions)
+6. **Swensen's Singapore** - https://swensens.com.sg/promotions/ (Official promotions)
+7. **Instagram** - Official brand accounts for current deals
+
+**Focus on current promotions, discounts, and special offers that Singaporeans love like '1-for-1', 'set meals', 'happy hour', 'student discounts', 'member prices', 'early bird specials', 'SG60 promotions', etc. Search across these official sources, social media (Instagram, Facebook, TikTok), review sites, and local deal platforms. Return only real, current offers with specific details that Singaporeans would find valuable.`;
+
+        // Enhanced search prompt with Singapore context
+        const categoryContext = singaporeDealCategories[category] || {};
+        const keywords = categoryContext.keywords || [];
+        const popularAreas = categoryContext.popularAreas || [];
+        
+        const searchPrompt = `Find current deals and promotions for these ${category} businesses near ${locationName}, Singapore:\n\n${nearbyPlaces.map(p => `- Name: ${p.displayName?.text || p.displayName}, Website: ${p.websiteUri || 'N/A'}, Place ID: ${p.id}`).join('\n')}\n\nFocus on Singapore-specific deals like: ${keywords.join(', ')}\n\nPopular areas to check: ${popularAreas.join(', ')}\n\nReturn a JSON object with 'deals' array containing objects with 'place_id' and 'deal_info'. Only include real, current deals with specific details that Singaporeans would find valuable. If no deal found for a business, set deal_info to null.`;
 
         const response = await openai.chat.completions.create({
             model: model,
@@ -194,7 +202,33 @@ export async function searchDealsWithOpenAI(location, category, botConfig, nearb
 
         const totalDealsFound = enhancedPlaces.filter(p => p.deal_info && p.deal_info !== null).length;
         console.log(`[DealsUtils] Deal search completed: ${totalDealsFound} total deals found for ${enhancedPlaces.length} places`);
-        return enhancedPlaces;
+        
+        // Ensure we return exactly 5 deals (or fewer if not enough found)
+        const dealsWithInfo = enhancedPlaces.filter(p => p.deal_info && p.deal_info !== null);
+        const dealsWithoutInfo = enhancedPlaces.filter(p => !p.deal_info || p.deal_info === null);
+        
+        // Remove duplicate restaurants from deals with info
+        const seenRestaurants = new Set();
+        const uniqueDealsWithInfo = dealsWithInfo.filter(deal => {
+            const restaurantName = (deal.displayName?.text || deal.displayName || deal.name || '').toLowerCase().trim();
+            
+            if (!seenRestaurants.has(restaurantName) && restaurantName) {
+                seenRestaurants.add(restaurantName);
+                return true;
+            } else {
+                console.log(`[DealsUtils] Skipping duplicate restaurant in OpenAI search: ${deal.displayName?.text || deal.displayName || deal.name} (already seen: ${restaurantName})`);
+                return false;
+            }
+        });
+        
+        // Take up to 5 unique deals with info, then fill with places without deals if needed
+        const finalDeals = [
+            ...uniqueDealsWithInfo.slice(0, 5),
+            ...dealsWithoutInfo.slice(0, Math.max(0, 5 - uniqueDealsWithInfo.length))
+        ];
+        
+        console.log(`[DealsUtils] Returning exactly ${finalDeals.length} deals (${uniqueDealsWithInfo.length} unique deals with info, ${finalDeals.length - uniqueDealsWithInfo.length} without deals)`);
+        return finalDeals;
 
     } catch (error) {
         console.error('[DealsUtils] Error in searchDealsWithOpenAI:', error);
@@ -268,23 +302,56 @@ export async function searchDealsWithDirectWebSearch(location, category, botConf
             console.log(`[DealsUtils] 📡 Location Source: ${location.source} (confirms this is fresh location data)`);
         }
         
+        // Singapore-specific deal search prompt
+        const categoryContext = singaporeDealCategories[category] || {};
+        const keywords = categoryContext.keywords || [];
+        const popularAreas = categoryContext.popularAreas || [];
+        
         const prompt = `Find 5 real, current ${category} deals and promotions near ${locationContext}. I need actual Singapore businesses with active offers right now.
+
+**PRIMARY DEAL SOURCES TO SEARCH:**
+1. **Soup Restaurant** - https://www.souprestaurant.com.sg/ (Official SG60 Promo)
+2. **Great Deals Singapore** - https://www.greatdeals.com.sg/ (SG60 60% Off deals)
+3. **Eatigo** - https://eatigo.com/sg/ (Up to 30% Off restaurant deals)
+4. **Chope Singapore** - https://shop.chope.co/ (20% Off Cash Vouchers)
+5. **Syioknya Singapore** - https://sg.syioknya.com/ (SG60 Meal promotions)
+6. **Swensen's Singapore** - https://swensens.com.sg/promotions/ (Official promotions)
+7. **Instagram** - Official brand accounts for current deals
 
 For each deal, provide:
 • **Business Name**: Full name of the establishment
 • **Address**: Complete address with Singapore postal code
-• **Deal Details**: Specific offer (e.g., "20% off all items", "1-for-1 main course", "Set meal $15.90")
+• **Deal Details**: Specific offer (e.g., "20% off all items", "1-for-1 main course", "Set meal $15.90", "SG60 60% off")
 • **Contact**: Phone number and/or website
 • **Validity**: When the deal is valid (if known)
-• **Source**: Where this information comes from
+• **Source**: Where this information comes from (prefer official sources above)
+
+Focus on Singapore-specific deals like: ${keywords.join(', ')}
+
+Popular areas to check: ${popularAreas.join(', ')}
+
+Singapore chains to look for:
+- Food: Toast Box, Ya Kun, Old Chang Kee, Din Tai Fung, Crystal Jade, Paradise Group, Soup Restaurant
+- Fashion: Uniqlo, H&M, Zara, Cotton On, Charles & Keith, Pedro
+- Events: Marina Bay Sands, Esplanade, Singapore Zoo, Universal Studios
+- Malls: ION Orchard, Marina Bay Sands, VivoCity, Jewel Changi, Plaza Singapura
+
+**Current Promotions to Focus On:**
+- SG60 National Day promotions (60% off deals)
+- Swensen's 1-for-1 Sundaes (Weekdays 2–5 PM)
+- Koufu SG60 $6 Meal Sets
+- Uncle Leong Signatures @ Hougang (Up to 30% Off)
+- Mun Ting Xiang (Hougang) 20% Off Cash Vouchers
 
 Focus on:
-- Well-known Singapore chains (Toast Box, Ya Kun, Old Chang Kee, Uniqlo, H&M, etc.)
+- Well-known Singapore chains and local businesses
 - Popular shopping malls and restaurants in the area
-- Current promotions that are actually running
+- Current promotions that are actually running (especially SG60)
 - Businesses that are currently operating
+- Deals that Singaporeans would find valuable
+- Official sources and verified deals
 
-Avoid generic or made-up information. Be specific and accurate.`;
+Avoid generic or made-up information. Be specific and accurate. Prioritize deals from the official sources listed above.`;
         
         // Extract location details for OpenAI web search
         let city = 'Singapore';
@@ -664,7 +731,23 @@ function parseDealsFromResponse(content, category, location) {
         }
         
         console.log(`[DealsUtils] Successfully parsed ${deals.length} deals`);
-        return deals.length > 0 ? deals : null;
+        
+        // Remove duplicate restaurants based on business name
+        const seenRestaurants = new Set();
+        const uniqueDeals = deals.filter(deal => {
+            const restaurantName = (deal.businessName || deal.restaurant || deal.store || deal.title || '').toLowerCase().trim();
+            
+            if (!seenRestaurants.has(restaurantName) && restaurantName) {
+                seenRestaurants.add(restaurantName);
+                return true;
+            } else {
+                console.log(`[DealsUtils] Skipping duplicate restaurant in parsed response: ${deal.businessName} (already seen: ${restaurantName})`);
+                return false;
+            }
+        });
+        
+        console.log(`[DealsUtils] After restaurant deduplication: ${uniqueDeals.length} unique restaurant deals`);
+        return uniqueDeals.length > 0 ? uniqueDeals : null;
         
     } catch (error) {
         console.error('[DealsUtils] Error parsing deals from response:', error);
@@ -703,10 +786,26 @@ export function createIndividualDealMessages(deals, category, nearbyPlacesDetail
         }];
     }
     
+    // Remove duplicate restaurants before creating messages
+    const seenRestaurants = new Set();
+    const uniqueDeals = deals.filter(deal => {
+        const restaurantName = (deal.businessName || deal.restaurant || deal.store || deal.title || deal.business || '').toLowerCase().trim();
+        
+        if (!seenRestaurants.has(restaurantName) && restaurantName) {
+            seenRestaurants.add(restaurantName);
+            return true;
+        } else {
+            console.log(`[DealsUtils] Skipping duplicate restaurant in message creation: ${deal.businessName || deal.restaurant || deal.store || deal.title} (already seen: ${restaurantName})`);
+            return false;
+        }
+    });
+    
+    console.log(`[DealsUtils] Creating messages for ${uniqueDeals.length} unique restaurants (from ${deals.length} total deals)`);
+    
     const dealMessages = [];
     
-    // Create individual message for each deal
-    deals.slice(0, 5).forEach((deal, index) => {
+    // Create individual message for each unique deal
+    uniqueDeals.slice(0, 5).forEach((deal, index) => {
         const offer = deal.offer || deal.discount || 'Special Deal';
         const businessName = deal.businessName || deal.restaurant || deal.store || deal.title || deal.business || 'Business';
         const address = deal.address || deal.location?.formattedAddress || deal.location?.displayName || 'Address not available';
@@ -998,15 +1097,15 @@ export function createIndividualDealMessages(deals, category, nearbyPlacesDetail
                     {
                         type: "reply",
                         reply: {
-                            id: "search_new_area",
-                            title: "📍 New Area"
+                            id: "setup_alert",
+                            title: "🔔 Set Daily Alert"
                         }
                     },
                     {
                         type: "reply",
                         reply: {
-                            id: "share_all_deals",
-                            title: "📤 Share All"
+                            id: "search_new_area",
+                            title: "📍 New Area"
                         }
                     }
                 ]
@@ -1283,12 +1382,28 @@ export async function searchMoreDealsFromDynamoDB(location, category, sharedDeal
         
         console.log(`[DealsUtils] Found ${uniqueDeals.length} unique additional deals`);
         
+        // Remove duplicate restaurants based on business name
+        const seenRestaurants = new Set();
+        const uniqueRestaurantDeals = uniqueDeals.filter(deal => {
+            const restaurantName = (deal.businessName || deal.placeName || deal.title || deal.restaurant || '').toLowerCase().trim();
+            
+            if (!seenRestaurants.has(restaurantName) && restaurantName) {
+                seenRestaurants.add(restaurantName);
+                return true;
+            } else {
+                console.log(`[DealsUtils] Skipping duplicate restaurant: ${deal.businessName} (already seen: ${restaurantName})`);
+                return false;
+            }
+        });
+        
+        console.log(`[DealsUtils] After restaurant deduplication: ${uniqueRestaurantDeals.length} unique restaurant deals`);
+        
         // Sort by creation date (newest first) and limit results
-        const sortedDeals = uniqueDeals
+        const sortedDeals = uniqueRestaurantDeals
             .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
             .slice(0, maxResults);
         
-        console.log(`[DealsUtils] Returning ${sortedDeals.length} more deals from DynamoDB`);
+        console.log(`[DealsUtils] Returning ${sortedDeals.length} more deals from DynamoDB (unique restaurants only)`);
         
         // If no deals found in DynamoDB, fallback to Google search + OpenAI
         if (sortedDeals.length === 0) {

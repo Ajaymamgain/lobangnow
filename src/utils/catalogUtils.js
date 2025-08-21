@@ -321,24 +321,40 @@ export async function testCatalogAccessibility(botConfig) {
  * Create deals message using catalog with automatic fallback to interactive list
  */
 export async function createCatalogDealsMessage(deals, category, botConfig) {
+    // Remove duplicate restaurants before processing
+    const seenRestaurants = new Set();
+    const uniqueDeals = deals.filter(deal => {
+        const restaurantName = (deal.businessName || deal.restaurant || deal.store || deal.title || '').toLowerCase().trim();
+        
+        if (!seenRestaurants.has(restaurantName) && restaurantName) {
+            seenRestaurants.add(restaurantName);
+            return true;
+        } else {
+            console.log(`[Catalog] Skipping duplicate restaurant in catalog: ${deal.businessName || deal.restaurant || deal.store || deal.title} (already seen: ${restaurantName})`);
+            return false;
+        }
+    });
+    
+    console.log(`[Catalog] Processing ${uniqueDeals.length} unique restaurants (from ${deals.length} total deals)`);
+    
     try {
-        console.log(`[Catalog] Creating deals message for ${deals.length} deals`);
+        console.log(`[Catalog] Creating deals message for ${uniqueDeals.length} unique deals`);
         
         // First, test if catalog is accessible
         const isCatalogAccessible = await testCatalogAccessibility(botConfig);
         
         if (!isCatalogAccessible) {
             console.log('[Catalog] Catalog not accessible, using individual messages fallback');
-            return createIndividualDealMessages(deals, category, []);
+            return createIndividualDealMessages(uniqueDeals, category, []);
         }
         
         console.log('[Catalog] Catalog accessible, attempting to add deals to catalog');
         
-        // Add each deal to the catalog
+        // Add each unique deal to the catalog
         const catalogProducts = [];
         
-        for (let i = 0; i < Math.min(deals.length, 10); i++) {
-            const deal = deals[i];
+        for (let i = 0; i < Math.min(uniqueDeals.length, 10); i++) {
+            const deal = uniqueDeals[i];
             const catalogProduct = await addDealToCatalog(deal, i, botConfig);
             
             if (catalogProduct) {
@@ -355,7 +371,7 @@ export async function createCatalogDealsMessage(deals, category, botConfig) {
         
         if (catalogProducts.length === 0) {
             console.log('[Catalog] No deals could be added to catalog, falling back to individual messages');
-            return createIndividualDealMessages(deals, category, []);
+            return createIndividualDealMessages(uniqueDeals, category, []);
         }
         
         console.log(`[Catalog] Successfully added ${catalogProducts.length} deals to catalog`);
@@ -370,7 +386,7 @@ export async function createCatalogDealsMessage(deals, category, botConfig) {
         console.error('[Catalog] Error creating catalog deals message:', error);
         // Fallback to individual messages if catalog approach fails
         console.log('[Catalog] Falling back to individual messages due to error');
-        return createIndividualDealMessages(deals, category, []);
+        return createIndividualDealMessages(uniqueDeals, category, []);
     }
 }
 

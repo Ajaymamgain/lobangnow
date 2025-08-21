@@ -1,19 +1,19 @@
 // WhatsApp webhook handler in Node.js
 // Forcing redeploy for ES module package.json change.
 // Attempting forced redeploy to resolve ES module issue - 2025-06-19
-import crypto from 'crypto'; // For signature validation
-import { DynamoDBClient, GetItemCommand, PutItemCommand, ScanCommand } from '@aws-sdk/client-dynamodb';
-import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
-import axios from 'axios'; // Added for FastAPI calls
-import OpenAI from 'openai'; // Standard ESM import for OpenAI v4+
-import { processAction } from './actionProcessor.js';
-import { getStoreProducts, getProductByName } from '../utils/dynamoDbUtils.js'; // Added getStoreProducts and getProductByName
-import { getRecentCustomers, formatRecentCustomersMessage } from '../utils/ownerDashboard.js';
-import { executeGetInvoice } from '../utils/invoiceUtils.js';
-import { sendWhatsAppMessage } from '../utils/whatsappUtils.js';
-// import { handleOwnerReply } from '../utils/ownerReplyManager.js'; // DISABLED - not needed for LobangLah
-import { 
+const crypto = require('crypto'); // For signature validation
+const { DynamoDBClient, GetItemCommand, PutItemCommand, UpdateItemCommand, ScanCommand } = require('@aws-sdk/client-dynamodb');
+const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
+const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+// Using native fetch instead of axios/node-fetch
+const OpenAI = require('openai'); // OpenAI v4+ with CommonJS
+const { processAction } = require('./actionProcessor.js');
+const { getStoreProducts, getProductByName } = require('../utils/dynamoDbUtils.js'); // Added getStoreProducts and getProductByName
+const { getRecentCustomers, formatRecentCustomersMessage } = require('../utils/ownerDashboard.js');
+const { executeGetInvoice } = require('../utils/invoiceUtils.js');
+const { sendWhatsAppMessage } = require('../utils/whatsappUtils.js');
+// const { handleOwnerReply } = require('../utils/ownerReplyManager.js'); // DISABLED - not needed for LobangLah
+const { 
     isPriceSensitive,
     getDiscountPrompt,
     sendDiscountApprovalRequest,
@@ -23,10 +23,89 @@ import {
     handleProductSelection,
     handleTodaysOfferDiscount,
     handleAcceptDiscountOffer
-} from '../utils/discountUtils.js';
-import { handleLobangLahMessage, isLobangLahMessage } from './lobangLahHandler.js';
+} = require('../utils/discountUtils.js');
+const { handleLobangLahMessage, isLobangLahMessage } = require('./lobangLahHandler.js');
+const { handleSocialAgencyMessage } = require('./socialAgencyHandler.js');
+const { handleDailyDealMessage } = require('./dailyDealHandler.js');
 
 // QR-related imports removed as per user request
+
+// NEW: Generate fresh webhook credentials for testing
+function generateFreshWebhookCredentials() {
+  const webhookSecret = crypto.randomBytes(32).toString('hex'); // 64 character hex string
+  const verifyToken = crypto.randomBytes(16).toString('hex'); // 32 character hex string
+  
+  console.log('🆕 Generated fresh webhook credentials:');
+  console.log(`🔑 Webhook Secret: ${webhookSecret}`);
+  console.log(`🔐 Verify Token: ${verifyToken}`);
+  
+  return { webhookSecret, verifyToken };
+}
+
+// NEW: Test webhook endpoint with fresh credentials
+async function handleTestWebhook(event) {
+  console.log('🧪 Processing test webhook request');
+  
+  // Use the correct whatsappAppSecret that Meta is actually using for signature validation
+  const whatsappAppSecret = "41a1282f73264393b446731d67416b31"; // This is what Meta is using
+  const verifyToken = "pasarnext";   // Keep the verify token as pasarnext
+  
+  console.log('🔄 Using correct webhook credentials:');
+  console.log(`🔑 WhatsApp App Secret: ${whatsappAppSecret} (for signature validation)`);
+  console.log(`🔐 Verify Token: ${verifyToken} (for verification requests)`);
+  
+  // Store these in DynamoDB for the current store
+  try {
+    const storeId = 'cmanyfn1e0001jl04j3k45mz5'; // Your store ID
+    const tableName = "WhatsappStoreTokens";
+    const tableRegion = "us-east-1";
+    const dynamoClient = new DynamoDBClient({ region: tableRegion });
+    
+    // Update the webhook credentials
+    const updateParams = {
+      TableName: tableName,
+      Key: marshall({ storeId: storeId }),
+      UpdateExpression: "SET whatsappAppSecret = :secret, verifyToken = :token, updatedAt = :timestamp",
+      ExpressionAttributeValues: marshall({
+        ":secret": whatsappAppSecret,
+        ":token": verifyToken,
+        ":timestamp": new Date().toISOString()
+      })
+    };
+    
+    await dynamoClient.send(new UpdateItemCommand(updateParams));
+    console.log(`✅ Updated DynamoDB with correct webhook credentials for store: ${storeId}`);
+    
+    return {
+      statusCode: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        success: true,
+        message: "Webhook credentials updated with correct Meta configuration!",
+        whatsappAppSecret: whatsappAppSecret,
+        verifyToken: verifyToken,
+        instructions: [
+          "✅ WhatsApp App Secret set to '41a1282f73264393b446731d67416b31' (for signature validation)",
+          "✅ Verify token set to 'pasarnext' (for verification requests)",
+          "Now send a WhatsApp message to test the webhook!"
+        ]
+      })
+    };
+    
+  } catch (error) {
+    console.error('❌ Error updating DynamoDB:', error);
+    return {
+      statusCode: 500,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        success: false,
+        error: "Failed to update DynamoDB",
+        whatsappAppSecret: whatsappAppSecret,
+        verifyToken: verifyToken
+      })
+    };
+  }
+}
 
 // Function to extract the WhatsApp Phone Number ID from the webhook payload
 function extractWhatsAppPhoneId(event) {
@@ -113,9 +192,15 @@ async function getStoreWebhookSettings(storeId) {
     
     const settings = unmarshall(Item);
     console.log(`Found webhook settings for store: ${storeId}`);
+    
+    // Debug: Log all available fields
+    console.log(`[storeId: ${storeId}] Available webhook settings fields:`, Object.keys(settings));
+    console.log(`[storeId: ${storeId}] webhookSecret value:`, settings.webhookSecret);
+    console.log(`[storeId: ${storeId}] whatsappAppSecret value:`, settings.whatsappAppSecret);
+    
     return {
-      webhookSecret: settings.whatsappAppSecret || settings.webhookSecret,
-      verifyToken: settings.verifyToken || settings.webhookVerifyToken
+      webhookSecret: settings.whatsappAppSecret || settings.webhookSecret,  // Use whatsappAppSecret as primary, fallback to webhookSecret
+      verifyToken: settings.verifyToken
     };
   } catch (error) {
     console.error('Error getting store webhook settings:', error);
@@ -124,7 +209,7 @@ async function getStoreWebhookSettings(storeId) {
 }
 
 // Helper function to handle webhook verification (GET request)
-async function handleGetRequest(event) {
+async function handleGetRequest(event, verificationToken = "default_token") {
   console.log('Processing GET request for webhook verification');
   
   // Extract query parameters for verification
@@ -133,21 +218,17 @@ async function handleGetRequest(event) {
   const challenge = queryParams['hub.challenge'];
   const token = queryParams['hub.verify_token'];
   
-  console.log(`Verification params: mode=${mode}, token=${token}, challenge=${challenge}`);
+  console.log(`Verification request: mode=${mode}, token=${token}, challenge=${challenge}`);
   
-  // For webhook verification, use the environment variable token as fallback
-  // since WhatsApp verification doesn't include store-specific information
-  const expectedToken = process.env.WEBHOOK_VERIFY_TOKEN || "pasarnext";
-  
-  // Check if the provided token matches the expected verification token
-  if (mode === 'subscribe' && token === expectedToken) {
-    console.log('Webhook verification successful');
+  // Use the passed verificationToken
+  if (mode === 'subscribe' && token === verificationToken) {
+    console.log('Webhook verified successfully');
     return {
       statusCode: 200,
       body: challenge,
     };
   } else {
-    console.error(`Failed webhook verification: mode=${mode}, token mismatch (expected: ${expectedToken}, got: ${token})`);
+    console.error(`Failed webhook verification: mode=${mode}, token=${token}`);
     return {
       statusCode: 403,
       body: JSON.stringify({ status: "error", message: "Verification failed" }),
@@ -518,7 +599,7 @@ async function updateSession(storeId, userId, conversation) {
 
     const params = {
       TableName: process.env.SESSION_TABLE_NAME,
-      Item: marshall(itemToPut), // Marshall the whole item
+      Item: marshall(itemToPut, { convertClassInstanceToMap: true }), // Marshall with URL support
     };
     await client.send(new PutItemCommand(params));
   } catch (error) {
@@ -536,49 +617,63 @@ async function executeGetOrderHistory(storeId, customerWhatsappNumber, botConfig
   }
 
   try {
-    const response = await axios.get(`${fastapiBaseUrl}/stores/${storeId}/orders/`, {
-      params: { customer_id: customerWhatsappNumber, limit: 5 } // Fetch last 5 orders
-    });
+    // Build URL with query parameters
+    const url = new URL(`${fastapiBaseUrl}/stores/${storeId}/orders/`);
+    url.searchParams.append('customer_id', customerWhatsappNumber);
+    url.searchParams.append('limit', '5');
 
-    if (response.data && response.data.orders && response.data.orders.length > 0) {
+    const response = await fetch(url.toString());
+    if (!response.ok) {
+      throw new Error(`FastAPI error: ${response.status}`);
+    }
+
+    const responseData = await response.json();
+    if (responseData && responseData.orders && responseData.orders.length > 0) {
       let messageBody = "Here are your last few orders:\n";
-      response.data.orders.forEach(order => {
+      responseData.orders.forEach(order => {
         const orderDate = new Date(order.created_at).toLocaleDateString();
         messageBody += `\nOrder ID: ${order.order_id}\nDate: ${orderDate}\nTotal: ${order.currency} ${order.total_amount}\nStatus: ${order.status}\n---`;
       });
       await sendWhatsAppMessage(storeId, customerWhatsappNumber, { type: 'text', text: { body: messageBody } }, botConfig);
-      return `Displayed ${response.data.orders.length} orders.`;
+      return `Displayed ${responseData.orders.length} orders.`;
     } else {
       await sendWhatsAppMessage(storeId, customerWhatsappNumber, { type: 'text', text: { body: "You have no recent orders, or I couldn't find any associated with your number." } }, botConfig);
       return "No orders found or error fetching orders.";
     }
   } catch (error) {
-    console.error(`[storeId: ${storeId}] Error fetching order history from FastAPI:`, error.response ? error.response.data : error.message);
+    console.error(`[storeId: ${storeId}] Error fetching order history from FastAPI:`, error.message);
     await sendWhatsAppMessage(storeId, customerWhatsappNumber, { type: 'text', text: { body: "Sorry, I encountered an error while fetching your order history." } }, botConfig);
     return "Error fetching order history.";
   }
 }
 
-export async function handler(event) {
+module.exports.handler = async function(event) {
   console.log('[Webhook] FULL INCOMING EVENT:', JSON.stringify(event, null, 2));
   try {
     // --- Debugging: Log incoming event structure and httpMethod ---
     console.log('[DEBUG] Lambda invoked. Event keys:', Object.keys(event));
     // Correctly access HTTP method for Payload Format Version 2.0
     const httpMethod = event.requestContext?.http?.method;
-    console.log(`[DEBUG] Detected HTTP method: ${httpMethod}`);
+    const path = event.rawPath || event.requestContext?.http?.path || '/webhook';
+    console.log(`[DEBUG] Detected HTTP method: ${httpMethod}, path: ${path}`);
     // --- End Debugging ---
+
+    // Handle test webhook route for generating fresh credentials
+    if (path === '/test-webhook' && httpMethod === 'POST') {
+      return handleTestWebhook(event);
+    }
 
     // Handle webhook verification (GET request)
     if (httpMethod === 'GET') {
-      // For GET requests (verification), use store-specific settings
-      return handleGetRequest(event);
+      const verificationToken = process.env.WEBHOOK_VERIFY_TOKEN || "whatsapp_verify_token";
+      return handleGetRequest(event, verificationToken);
     }
     
     // Handle incoming messages (POST request)
     if (httpMethod === 'POST') {
       // Extract WhatsApp Phone Number ID from the payload
       const whatsappPhoneNumberId = extractWhatsAppPhoneId(event);
+
       if (!whatsappPhoneNumberId) {
         console.error("No WhatsApp Phone Number ID found in the message payload");
         return {
@@ -620,6 +715,7 @@ export async function handler(event) {
 
         console.log(`[storeId: ${storeId}] Fetching bot configuration from DynamoDB table ${tableName} in region ${tableRegion}`);
         const { Item } = await tokenDocClient.send(new GetItemCommand(params));
+        
         if (Item) {
           botConfig = unmarshall(Item); // Unmarshall the item
           console.log(`[storeId: ${storeId}] Bot configuration fetched successfully for storeId: ${storeId}`);
@@ -667,28 +763,33 @@ export async function handler(event) {
       if (httpMethod === 'POST' && event.body) {
         const signature = event.headers['x-hub-signature-256'] || event.headers['X-Hub-Signature-256'];
         
-        // Fetch store-specific webhook settings
-        const webhookSettings = await getStoreWebhookSettings(storeId);
-        const webhookSecret = webhookSettings?.webhookSecret || botConfig.whatsappAppSecret;
-        
-        if (!webhookSecret) {
-            console.error(`[storeId: ${storeId}] Webhook Secret not configured for signature validation.`);
-            return { statusCode: 500, body: 'Internal Server Error: Webhook Secret missing' };
+        // Use botConfig.whatsappAppSecret directly for signature validation (as per working example)
+        if (!botConfig.whatsappAppSecret) {
+            console.error(`[storeId: ${storeId}] WhatsApp App Secret not configured for signature validation.`);
+            return { statusCode: 500, body: 'Internal Server Error: App Secret missing' };
         }
         if (!signature) {
           console.warn(`[storeId: ${storeId}] Missing X-Hub-Signature-256 header. Cannot validate signature.`);
           // Depending on policy, might reject or proceed with caution (not recommended for production)
           // return { statusCode: 400, body: 'Missing signature header' };
         } else {
-          const calculatedSignature = 'sha256=' + crypto.createHmac('sha256', webhookSecret).update(event.body).digest('hex');
+          // Add detailed debugging for signature calculation
+          console.log(`[storeId: ${storeId}] DEBUG: Raw event.body type: ${typeof event.body}`);
+          console.log(`[storeId: ${storeId}] DEBUG: Raw event.body length: ${event.body ? event.body.length : 'undefined'}`);
+          console.log(`[storeId: ${storeId}] DEBUG: Raw event.body preview: ${event.body ? event.body.substring(0, 200) + '...' : 'undefined'}`);
+          console.log(`[storeId: ${storeId}] DEBUG: WhatsApp App Secret being used: ${botConfig.whatsappAppSecret}`);
+          console.log(`[storeId: ${storeId}] DEBUG: Signature header received: ${signature}`);
+          
+          const calculatedSignature = 'sha256=' + crypto.createHmac('sha256', botConfig.whatsappAppSecret).update(event.body).digest('hex');
+          console.log(`[storeId: ${storeId}] DEBUG: Calculated signature: ${calculatedSignature}`);
 
           if (signature !== calculatedSignature) {
-            console.error(`[storeId: ${storeId}] Error: Invalid webhook signature. Calculated (Expected): '${calculatedSignature}', Got (From Header): '${signature}'. Webhook Secret used for calculation starts with: '${webhookSecret ? webhookSecret.substring(0,5) : 'NOT_FOUND'}...'`);
+            console.error(`[storeId: ${storeId}] ERROR: Invalid webhook signature. Calculated (Expected): '${calculatedSignature}', Got (From Header): '${signature}'. WhatsApp App Secret used for calculation starts with: '${botConfig.whatsappAppSecret ? botConfig.whatsappAppSecret.substring(0,5) : 'NOT_FOUND'}...'`);
             return { statusCode: 403, body: JSON.stringify({ status: "error", message: "Invalid webhook signature." }) };
           }
         }
         
-        console.log(`[storeId: ${storeId}] Webhook signature validated successfully using store settings.`);
+        console.log(`[storeId: ${storeId}] Webhook signature validated successfully.`);
 
         try {
       const body = JSON.parse(event.body);
@@ -751,9 +852,9 @@ export async function handler(event) {
                 console.log(`[storeId: ${storeId}] Processing new message ${messageId} from ${from}`);
                 
                 
-                // Check if the message is from the owner number
+                // Check if the message is from the owner number (skip for LobangLah bot)
                 const isFromOwner = ownerNumber && from === ownerNumber;
-                if (isFromOwner) {
+                if (isFromOwner && storeId !== 'cmanyfn1e0001jl04j3k45mz5') {
                   console.log(`[storeId: ${storeId}] Message received from owner number: ${from}. Will suppress OpenAI and product messages.`);
                   
                   // Only send the interactive dashboard for text messages, not for interactive button clicks
@@ -820,6 +921,11 @@ export async function handler(event) {
                   console.log(`[storeId: ${storeId}] Owner ${from} sent ${messageType} message. Processing normally.`);
                 }
                 
+                // For viral agency bot, treat owner messages as regular user messages
+                if (isFromOwner && storeId === 'cmanyfn1e0001jl04j3k45mz5') {
+                  console.log(`[storeId: ${storeId}] Viral agency owner message from ${from}. Processing as regular user message.`);
+                }
+                
                 const profileName = change.value.contacts?.[0]?.profile?.name || 'User';
                 
 
@@ -848,23 +954,57 @@ export async function handler(event) {
                 if (messageType === 'interactive' && message.interactive) {
                     console.log(`[storeId: ${storeId}] Processing interactive message:`, JSON.stringify(message.interactive));
 
-                    // Special handling for LobangLah deals bot (store ID: cmanyfn1e0001jl04j3k45mz5)
+                    // Special handling for DAILY DEAL VIRAL AGENCY (store ID: cmanyfn1e0001jl04j3k45mz5)
                     if (storeId === 'cmanyfn1e0001jl04j3k45mz5') {
-                        console.log(`[LobangLah] Detected LobangLah store, processing interactive message as deals bot`);
+                        console.log(`[DailyDeal] Detected DAILY DEAL AGENCY store, processing interactive message`);
                         
-                        const handled = await handleLobangLahMessage(
+                        const response = await handleDailyDealMessage(
                             storeId,
                             from,
-                            '',
                             'interactive',
+                            '',
+                            message.interactive,
+                            null,
                             botConfig,
-                            message.interactive
+                            session
                         );
                         
-                        if (handled) {
-                            console.log(`[LobangLah] Interactive message handled successfully for ${from}`);
-                            // Update session to track LobangLah interaction
-                            session.lastInteraction = 'lobanglah_deals';
+                        // ALWAYS handle viral agency messages exclusively - no fallback to other handlers
+                        console.log(`[DailyDeal] Interactive message processed for ${from} (success: ${response.success})`);
+                        
+                        // Note: handleDailyDealMessage already sends the response internally
+                        // We don't need to send it again here to avoid double-sending
+                        if (response && response.response && response.response.type) {
+                            console.log(`[DailyDeal] Daily deal response already sent by handler:`, response.response);
+                        }
+                        
+                        // Use updated session data from daily deal handler
+                        const updatedSession = response.session || session;
+                        updatedSession.lastInteraction = 'daily_deal_agency';
+                        updatedSession.timestamp = Date.now();
+                        await updateSession(storeId, from, updatedSession);
+                        continue; // Skip ALL other message processing for viral agency
+                    }
+                    
+                    // Special handling for Social Media Agency bot (store ID: viral_agency_main)
+                    if (storeId === 'viral_agency_main') {
+                        console.log(`[SocialAgency] Detected Social Media Agency store, processing interactive message`);
+                        
+                        const response = await handleSocialAgencyMessage(
+                            storeId,
+                            from,
+                            'interactive',
+                            '',
+                            message.interactive,
+                            null,
+                            botConfig,
+                            session
+                        );
+                        
+                        if (response.success) {
+                            console.log(`[SocialAgency] Interactive message handled successfully for ${from}`);
+                            // Update session to track agency interaction
+                            session.lastInteraction = 'social_agency';
                             session.timestamp = Date.now();
                             await updateSession(storeId, from, session);
                             continue; // Skip regular message processing
@@ -1147,28 +1287,60 @@ export async function handler(event) {
                     const currentMessageContent = message.text.body;
                     console.log(`[storeId: ${storeId}] Processing text message: "${currentMessageContent}"`);
                     
-                    // Special handling for LobangLah deals bot (store ID: cmanyfn1e0001jl04j3k45mz5)
+                    // Special handling for DAILY DEAL VIRAL AGENCY (store ID: cmanyfn1e0001jl04j3k45mz5)
                     if (storeId === 'cmanyfn1e0001jl04j3k45mz5') {
-                        console.log(`[LobangLah] Detected LobangLah store, processing as deals bot`);
+                        console.log(`[DailyDeal] Detected DAILY DEAL AGENCY store, processing text message`);
                         
-                        // Check if message should trigger LobangLah deals functionality
-                        if (isLobangLahMessage()) {
-                            const handled = await handleLobangLahMessage(
-                                storeId,
-                                from,
-                                currentMessageContent,
-                                'text',
-                                botConfig
-                            );
-                            
-                            if (handled) {
-                                console.log(`[LobangLah] Message handled successfully for ${from}`);
-                                // Update session to track LobangLah interaction
-                                session.lastInteraction = 'lobanglah_deals';
-                                session.timestamp = Date.now();
-                                await updateSession(storeId, from, session);
-                                continue; // Skip regular message processing
-                            }
+                        const response = await handleDailyDealMessage(
+                            storeId,
+                            from,
+                            'text',
+                            currentMessageContent,
+                            null,
+                            null,
+                            botConfig,
+                            session
+                        );
+                        
+                        // ALWAYS handle viral agency messages exclusively - no fallback to other handlers
+                        console.log(`[DailyDeal] Text message processed for ${from} (success: ${response.success})`);
+                        
+                        // Note: handleDailyDealMessage already sends the response internally
+                        // We don't need to send it again here to avoid double-sending
+                        if (response && response.response && response.response.type) {
+                            console.log(`[DailyDeal] Daily deal response already sent by handler:`, response.response);
+                        }
+                        
+                        // Use updated session data from daily deal handler
+                        const updatedSession = response.session || session;
+                        updatedSession.lastInteraction = 'daily_deal_agency';
+                        updatedSession.timestamp = Date.now();
+                        await updateSession(storeId, from, updatedSession);
+                        continue; // Skip ALL other message processing for viral agency
+                    }
+                    
+                    // Special handling for Social Media Agency bot (store ID: viral_agency_main)
+                    if (storeId === 'viral_agency_main') {
+                        console.log(`[SocialAgency] Detected Social Media Agency store, processing text message`);
+                        
+                        const response = await handleSocialAgencyMessage(
+                            storeId,
+                            from,
+                            'text',
+                            currentMessageContent,
+                            null,
+                            null,
+                            botConfig,
+                            session
+                        );
+                        
+                        if (response.success) {
+                            console.log(`[SocialAgency] Text message handled successfully for ${from}`);
+                            // Update session to track agency interaction
+                            session.lastInteraction = 'social_agency';
+                            session.timestamp = Date.now();
+                            await updateSession(storeId, from, session);
+                            continue; // Skip regular message processing
                         }
                     }
                     
@@ -1179,7 +1351,7 @@ export async function handler(event) {
                         
                         try {
                             // Get the order to retrieve store owner phone
-                            const { getOrderById, updateOrderById } = await import('../utils/dynamoDbUtils.js');
+                            const { getOrderById, updateOrderById } = require('../utils/dynamoDbUtils.js');
                             const order = await getOrderById(storeId, orderId);
                             
                             if (order && (order.owner_phone || order.ownerPhone)) {
@@ -1507,28 +1679,55 @@ export async function handler(event) {
                     } // End of 'if (!keywordActionTaken)'
                 // END Fallback to OpenAI
 
-                // 3. Handle Location Messages for LobangLah
+                // 3. Handle Location Messages
                 } else if (messageType === 'location' && message.location) {
                     console.log(`[storeId: ${storeId}] Processing location message`);
                     
-                    // Special handling for LobangLah deals bot (store ID: cmanyfn1e0001jl04j3k45mz5)
+                    // Special handling for DAILY DEAL VIRAL AGENCY (store ID: cmanyfn1e0001jl04j3k45mz5)
                     if (storeId === 'cmanyfn1e0001jl04j3k45mz5') {
-                        console.log(`[LobangLah] Detected LobangLah store, processing location message as deals bot`);
+                        console.log(`[DailyDeal] Detected DAILY DEAL AGENCY store, processing location message`);
                         
-                        const handled = await handleLobangLahMessage(
+                        const response = await handleDailyDealMessage(
                             storeId,
                             from,
-                            '',
                             'location',
-                            botConfig,
+                            '',
                             null,
-                            message.location
+                            message.location,
+                            botConfig,
+                            session
                         );
                         
-                        if (handled) {
-                            console.log(`[LobangLah] Location message handled successfully for ${from}`);
-                            // Update session to track LobangLah interaction
-                            session.lastInteraction = 'lobanglah_deals';
+                        // ALWAYS handle viral agency messages exclusively - no fallback to other handlers
+                        console.log(`[DailyDeal] Location message processed for ${from} (success: ${response.success})`);
+                        
+                        // Use updated session data from daily deal handler
+                        const updatedSession = response.session || session;
+                        updatedSession.lastInteraction = 'daily_deal_agency';
+                        updatedSession.timestamp = Date.now();
+                        await updateSession(storeId, from, updatedSession);
+                        continue; // Skip ALL other message processing for viral agency
+                    }
+                    
+                    // Special handling for Social Media Agency bot (store ID: viral_agency_main)
+                    if (storeId === 'viral_agency_main') {
+                        console.log(`[SocialAgency] Detected Social Media Agency store, processing location message`);
+                        
+                        const response = await handleSocialAgencyMessage(
+                            storeId,
+                            from,
+                            'location',
+                            '',
+                            null,
+                            message.location,
+                            botConfig,
+                            session
+                        );
+                        
+                        if (response.success) {
+                            console.log(`[SocialAgency] Location message handled successfully for ${from}`);
+                            // Update session to track agency interaction
+                            session.lastInteraction = 'social_agency';
                             session.timestamp = Date.now();
                             await updateSession(storeId, from, session);
                             continue; // Skip regular message processing
@@ -1541,6 +1740,64 @@ export async function handler(event) {
                     await sendWhatsAppMessage(storeId, from, unsupportedMsg, botConfig);
                     conversation.push({ role: 'user', content: `[Sent location message]` });
                     conversation.push({ role: 'assistant', content: "Acknowledged location message." });
+                
+                // 4. Handle Image Messages (for Social Media Agency)
+                } else if (messageType === 'image' && message.image) {
+                    console.log(`[storeId: ${storeId}] Processing image message`);
+                    
+                    // Special handling for DAILY DEAL VIRAL AGENCY (store ID: cmanyfn1e0001jl04j3k45mz5)
+                    if (storeId === 'cmanyfn1e0001jl04j3k45mz5') {
+                        console.log(`[DailyDeal] Detected DAILY DEAL AGENCY store, processing image message`);
+                        
+                        const response = await handleDailyDealMessage(
+                            storeId,
+                            from,
+                            'image',
+                            '',
+                            null,
+                            null,
+                            botConfig,
+                            session
+                        );
+                        
+                        // ALWAYS handle viral agency messages exclusively - no fallback to other handlers
+                        console.log(`[DailyDeal] Image message processed for ${from} (success: ${response.success})`);
+                        
+                        // Use updated session data from daily deal handler
+                        const updatedSession = response.session || session;
+                        updatedSession.lastInteraction = 'daily_deal_agency';
+                        updatedSession.timestamp = Date.now();
+                        await updateSession(storeId, from, updatedSession);
+                        continue; // Skip ALL other message processing for viral agency
+                    } 
+                    // Special handling for Social Media Agency bot (store ID: viral_agency_main)
+                    else if (storeId === 'viral_agency_main') {
+                        console.log(`[SocialAgency] Detected Social Media Agency store, processing image message`);
+                        
+                        const response = await handleSocialAgencyMessage(
+                            storeId,
+                            from,
+                            'image',
+                            '',
+                            null,
+                            null,
+                            botConfig,
+                            session
+                        );
+                        
+                        if (response.success) {
+                            console.log(`[SocialAgency] Image message handled successfully for ${from}`);
+                            // Update session to track agency interaction
+                            session.lastInteraction = 'social_agency';
+                            session.timestamp = Date.now();
+                            await updateSession(storeId, from, session);
+                            continue; // Skip regular message processing
+                        }
+                    } else {
+                        console.log(`[storeId: ${storeId}] Image message not supported for this store type`);
+                        const unsupportedMsg = { type: 'text', text: { body: "Sorry, I can only process text messages and button clicks at the moment." } };
+                        await sendWhatsAppMessage(storeId, from, unsupportedMsg, botConfig);
+                    }
                     
                 } else { // Handle Unsupported Message Types
                     console.log(`[storeId: ${storeId}] Received an unhandled or unsupported message type: ${messageType}.`);

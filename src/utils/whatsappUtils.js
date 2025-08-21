@@ -264,3 +264,44 @@ export async function sendWhatsAppMessage(storeId, phoneNumber, message, botConf
     return null;
   }
 }
+
+/**
+ * Download image from WhatsApp using Media API
+ * @param {string} mediaId - WhatsApp media ID
+ * @param {string} whatsappToken - WhatsApp access token
+ * @returns {Promise<Buffer>} - Image buffer
+ */
+export async function downloadWhatsAppImage(mediaId, whatsappToken) {
+  try {
+    console.log(`[WhatsAppUtils] Downloading image with media ID: ${mediaId}`);
+    
+    // First, get the media URL from WhatsApp
+    const mediaUrl = `https://graph.facebook.com/v19.0/${mediaId}`;
+    const mediaResponse = await axios.get(mediaUrl, {
+      headers: {
+        'Authorization': `Bearer ${whatsappToken}`,
+      },
+    });
+    
+    if (!mediaResponse.data || !mediaResponse.data.url) {
+      throw new Error('No media URL received from WhatsApp');
+    }
+    
+    // Download the actual image
+    const imageResponse = await axios.get(mediaResponse.data.url, {
+      headers: {
+        'Authorization': `Bearer ${whatsappToken}`,
+      },
+      responseType: 'arraybuffer',
+    });
+    
+    const imageBuffer = Buffer.from(imageResponse.data);
+    console.log(`[WhatsAppUtils] Successfully downloaded image: ${imageBuffer.length} bytes`);
+    
+    return imageBuffer;
+    
+  } catch (error) {
+    console.error('[WhatsAppUtils] Error downloading WhatsApp image:', error.message);
+    throw error;
+  }
+}

@@ -137,3 +137,59 @@ export function combineSearchResults(openaiDeals = [], googleDeals = []) {
         return openaiDeals.slice(0, 5); // Fallback to OpenAI results only
     }
 }
+
+/**
+ * Find official social handles for a restaurant using Google CSE
+ * Returns best-effort links constrained to Singapore context.
+ */
+export async function searchOfficialSocialHandles(restaurantName, apiKey, cseId = '6572826d51e2f4d78') {
+    try {
+        if (!apiKey || !restaurantName) return {};
+        const axios = (await import('axios')).default;
+        const searchUrl = 'https://www.googleapis.com/customsearch/v1';
+        const mkParams = (q) => ({ key: apiKey, cx: cseId, q, num: 5, gl: 'sg', hl: 'en', cr: 'countrySG' });
+
+        const queries = [
+            `${restaurantName} official website Singapore`,
+            `${restaurantName} instagram Singapore site:instagram.com`,
+            `${restaurantName} facebook Singapore site:facebook.com`,
+            `${restaurantName} tiktok Singapore site:tiktok.com`
+        ];
+
+        console.log(`[GoogleCSE] Enriching social handles for ${restaurantName}`);
+        const results = await Promise.allSettled(queries.map(q => axios.get(searchUrl, { params: mkParams(q), timeout: 10000 })));
+
+        const found = { website: '', instagram: '', facebook: '', tiktok: '' };
+        for (const r of results) {
+            if (r.status !== 'fulfilled' || !r.value?.data?.items) continue;
+            for (const item of r.value.data.items) {
+                const link = item.link || '';
+                const lower = link.toLowerCase();
+                // skip aggregator/directories
+                if (/(quandoo|chope|hungrygowhere|tripadvisor|burpple|grabfood|foodpanda|deliveroo|google|yelp)/.test(lower)) {
+                    continue;
+                }
+                if (!found.instagram && isValidInstagramUrl(lower)) found.instagram = link;
+                if (!found.facebook && isValidFacebookUrl(lower)) found.facebook = link;
+                if (!found.tiktok && isValidTiktokUrl(lower)) found.tiktok = link;
+            }
+        }
+        console.log('[GoogleCSE] Social handles found:', found);
+        return found;
+    } catch (err) {
+        console.error('[GoogleCSE] Error searching official social handles:', err);
+        return {};
+    }
+}
+
+function isValidInstagramUrl(url) {
+    return /^https?:\/\/(www\.)?instagram\.com\/[A-Za-z0-9_.]+\/?(\?.*)?$/.test(url);
+}
+function isValidFacebookUrl(url) {
+    // exclude groups/events
+    if (/facebook\.com\/(groups|events)\//.test(url)) return false;
+    return /^https?:\/\/(www\.)?facebook\.com\/[A-Za-z0-9\.]+\/?(\?.*)?$/.test(url);
+}
+function isValidTiktokUrl(url) {
+    return /^https?:\/\/(www\.)?tiktok\.com\/@[A-Za-z0-9_.]+\/?(\?.*)?$/.test(url);
+}
